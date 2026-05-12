@@ -1,0 +1,58 @@
+# System Architecture: Mr. PERFECT Agent (GUI Edition)
+
+## Overview
+Mr. PERFECT is a **GUI-based agentic workflow application** powered by the Gemma‑4‑E4B‑it‑Q4_K_M.gguf model.  
+It runs locally in **CPU-only mode** on Windows (20GB RAM), orchestrating ~88 tasks through modular tools and workflows.
+
+---
+
+## Components
+
+### 1. GUI Layer
+- Built with **Tkinter** (Python)
+- Features:
+  - Scrollable prompt/response areas
+  - Vertical layout with buttons on the right
+  - Clear and copy buttons
+  - Session logging
+  - Status messages for API calls
+
+### 2. Model Backend
+- **Gemma‑4‑E4B‑it‑Q4_K_M.gguf** (4.63 GB, Q4_K_M quantization)
+- Runs via **text-generation-webui** with `llama.cpp` loader
+- Exposes:
+  - Web UI at `http://127.0.0.1:7860`
+  - OpenAI/Anthropic-compatible API at `http://127.0.0.1:5000/v1`
+
+### 3. Agent Layer (Mr. PERFECT)
+- Python script `agent.py`
+- Connects to API endpoint
+- Implements **agentic orchestration**:
+  - Task routing
+  - Tool invocation
+  - Workflow chaining
+
+### 4. Tools
+- **EasyOCR** → text extraction
+- **pdf2image** → PDF rendering
+- **ChromaDB** → vector storage
+- **Custom utilities** → reasoning, summarization, automation
+
+### 5. Workflows
+- Predefined set of ~88 tasks
+- Examples:
+  - Document summarization
+  - OCR → DB → reasoning pipeline
+  - Context-aware Q&A
+  - Multi-step automation
+
+---
+
+## Data Flow
+
+1. **User Input (GUI)** → Agent (Mr. PERFECT)  
+2. **Agent** → API (`http://127.0.0.1:5000/v1`)  
+3. **Model Response** → Agent orchestrates tools  
+4. **Tools** → Perform subtasks (OCR, DB, etc.)  
+5. **Agent** → Combines results into final output  
+6. **User Output (GUI)** → Displayed in response area
