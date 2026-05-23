@@ -85,10 +85,34 @@ ollama pull gemma:2b  # or any model you prefer
 - Start the local server
 - Default URL: `http://127.0.0.1:1234/v1`
 
-### 4. Run the Application
+### 4. Run the Application IT WOULD RUN AGENT Mr. PERFECT
 ```bash
 python agent.py
+
 ```
+DOWNLOAD GEMMA 4 MODEL ACCORDING TO YOUR HARDWARE RAM AND DISK SPACE I AM USING GEMMA 4 E4B GGUF 4.63 GB FILE
+AFTER DOWNLOADING GEMMA 4 RUN TEXT-GENERATION WEBUI USE FOLLOWING COMMAND
+LATEST  gemma-4-E4B-it-Q4_K_M.gguf
+PS C:\Users\RAJAB BAIG> cd C:\text-generation-webui
+PS C:\text-generation-webui> .\venv\Scripts\activate
+(venv) PS C:\text-generation-webui> python server.py --cpu --listen-host 127.0.0.1 --listen-port 7860 --loader llama.cpp --model "D:\NEW-MODELS\New folder (22)\gemma-4-E4B-it-Q4_K_M.gguf" --auto-launch
+IF ALL STEPS WERE FOLLOWED AND WEBUI IS INSTALLED CORRECTLY MODEL WOULD RUN AND PROMPT
+main: model loaded
+main: server is listening on http://127.0.0.1:5005
+main: starting the main loop...
+22:33:57-707819 INFO     Loaded "D:\NEW-MODELS\New folder (22)\gemma-4-E4B-it-Q4_K_M.gguf" in 42.22 seconds.
+22:33:57-707819 INFO     LOADER: "llama.cpp"
+22:33:57-707819 INFO     CONTEXT LENGTH: 131072
+22:37:00-762808 INFO     OpenAI/Anthropic-compatible API URL:
+
+                         http://127.0.0.1:5000/v1
+
+
+Running on local URL:  http://127.0.0.1:7860
+NOW SET UP IS READY  
+Beware you would run text-generation -webui and agent.py
+
+
 
 ---
 
