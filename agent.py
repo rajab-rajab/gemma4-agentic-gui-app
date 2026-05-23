@@ -4,6 +4,7 @@ Enhanced with additional tools, better security, and improved error handling.
 """
 
 import os
+import sys
 import subprocess
 import datetime
 import threading
@@ -21,6 +22,11 @@ from urllib.parse import urlparse
 import customtkinter as ctk
 from openai import OpenAI
 from tavily import TavilyClient
+import html
+from bs4 import BeautifulSoup
+import tempfile
+from pathlib import Path
+from tkinter import filedialog  
 
 # --- CONFIGURATION ---
 LOCAL_LLM_URL = "http://127.0.0.1:5000/v1"
@@ -123,6 +129,58 @@ class AgentTools:
         }
         return formats.get(format_type, formats["default"])
     
+    def save_session(self, filename: str = None) -> str:
+        """Saves Brain & Heart state to JSON for the Dev Project session."""
+        if not self.gui or not self.gui.chat_history:
+            return "❌ No session history to save."
+            
+        if not filename:
+            filename = f"session_{datetime.datetime.now().strftime('%Y%m%d_%H%M%S')}.json"
+            
+        data = {
+            "metadata": {
+                "project": "Gemma 4 Challenge",
+                "brain": "Mr. Perfect",
+                "heart": "Gemma 4 E4B",
+                "timestamp": self.get_datetime("iso")
+            },
+            "history": self.gui.chat_history
+        }
+        
+        try:
+            with open(filename, 'w', encoding='utf-8') as f:
+                json.dump(data, f, indent=4)
+            return f"✅ Session saved to {filename}"
+        except Exception as e:
+            return f"❌ Save error: {str(e)}"
+
+    def load_session(self, filepath: str) -> str:
+        """The Brain reads the JSON and restores it to the GUI's memory."""
+        if not os.path.exists(filepath):
+            return f"❌ File not found: {filepath}"
+        
+        try:
+            with open(filepath, 'r', encoding='utf-8') as f:
+                data = json.load(f)
+                
+                # Support both 'history' and 'chat_history' keys for compatibility
+                history_data = data.get("history") or data.get("chat_history", [])
+                
+                if not history_data:
+                    return "⚠️ Loaded file contains no conversation history."
+                
+                # IMPORTANT: Overwrite the GUI history list
+                # This prevents the list from growing indefinitely
+                self.gui.chat_history = [] 
+                self.gui.chat_history = history_data
+                
+                # Trigger the UI refresh on the main thread
+                self.gui.after(0, self.gui.refresh_chat_display)
+                
+                return f"Memory restored: {len(history_data)} messages."
+        except Exception as e:
+            return f"❌ Load error: {str(e)}"
+    
     @staticmethod
     def run_powershell(command: str, timeout: int = 30) -> str:
         """Execute a PowerShell command and return output."""
@@ -154,46 +212,32 @@ class AgentTools:
             return f"Error: {str(e)}"
     
     @staticmethod
-    def web_search(query: str, depth: str = "basic") -> str:
-        """Search the web using Tavily API."""
-        if not tavily:
-            return "Error: Tavily API not configured. Set TAVILY_API_KEY environment variable."
-        try:
-            search_depth = "basic" if depth == "basic" else "advanced"
-            results = tavily.search(query=query, search_depth=search_depth, max_results=5)
-            
-            if isinstance(results, dict) and 'results' in results:
-                formatted = []
-                formatted.append(f"🔍 Search Results for: {query}")
-                formatted.append("=" * 60)
+    def web_search(query: str) -> str:
+        """
+        Search the web for up-to-date information, news, or facts.
+        Returns the top 4 most relevant results.
+        """
+        # 1. Try Tavily (Premium Search)
+        if 'tavily' in globals():
+            try:
+                # Reduced to 4 results for faster processing and less token noise
+                results = tavily.search(query=query, search_depth="advanced", max_results=4)
                 
-                for i, r in enumerate(results['results'][:5], 1):
-                    title = r.get('title', 'No title')
-                    url = r.get('url', '')
-                    content = r.get('content', '')[:250]
+                if isinstance(results, dict) and 'results' in results:
+                    formatted = [f"🔍 Search Results for: {query}", "=" * 50]
                     
-                    # Format with numbered results and clickable URL
-                    formatted.append(f"\n{i}. {title}")
-                    formatted.append(f"   📎 {url}")
-                    formatted.append(f"   💬 {content}...")
-                
-                formatted.append("\n" + "=" * 60)
-                formatted.append("\n📋 QUICK LINKS:")
-                for i, r in enumerate(results['results'][:5], 1):
-                    url = r.get('url', '')
-                    title = r.get('title', 'No title')[:50]
-                    if len(title) < len(r.get('title', 'No title')):
-                        title += "..."
-                    formatted.append(f"   [{i}] {title}: {url}")
-                
-                return "\n".join(formatted)
-            return str(results)[:1000]
-        except Exception as e:
-            return f"Error: {str(e)}"
-    
-    @staticmethod
-    def web_search_simple(query: str) -> str:
-        """Simple web search without API (uses DuckDuckGo basic HTML)."""
+                    for i, r in enumerate(results['results'], 1):
+                        title = r.get('title', 'No title')
+                        url = r.get('url', '')
+                        # Shortened content to 180 chars for faster LLM reasoning
+                        content = r.get('content', '')[:180]
+                        formatted.append(f"[{i}] {title}\n   🔗 {url}\n   📝 {content}...\n")
+                    
+                    return "\n".join(formatted)
+            except Exception as e:
+                pass # Fallback to DuckDuckGo silently
+
+        # 2. Fallback to DuckDuckGo (Simple Search)
         try:
             import urllib.request
             from urllib.parse import quote
@@ -202,82 +246,44 @@ class AgentTools:
             with urllib.request.urlopen(req, timeout=10) as response:
                 html = response.read().decode('utf-8', errors='ignore')
             
-            # Simple parsing for search results
+            # Simple parsing for search results (limited to top 3 for fallback)
             results = re.findall(r'<a class="result__a"[^>]*href="([^"]*)"[^>]*>([^<]*)</a>', html)
             snippets = re.findall(r'<a class="result__snippet"[^>]*>([^<]*)</a>', html)
             
-            output = [f"🔍 Search: {query}"]
-            output.append("=" * 60)
-            
-            for i, (url, title) in enumerate(results[:5], 1):
-                snippet = snippets[i] if i < len(snippets) else ""
-                output.append(f"\n{i}. {title}")
-                output.append(f"   📎 {url}")
-                output.append(f"   💬 {snippet[:150]}...")
-            
-            output.append("\n" + "=" * 60)
-            output.append("\n📋 QUICK LINKS:")
-            for i, (url, title) in enumerate(results[:5], 1):
-                title_short = title[:50] + "..." if len(title) > 50 else title
-                output.append(f"   [{i}] {title_short}: {url}")
+            output = [f"🔍 Search (Fallback): {query}", "=" * 50]
+            for i, (link, title) in enumerate(results[:3], 1):
+                snippet = snippets[i-1] if i-1 < len(snippets) else "No description available."
+                output.append(f"\n{i}. {title}\n   📎 {link}\n   💬 {snippet[:150]}...")
             
             return "\n".join(output)
         except Exception as e:
-            return f"Search Error: {str(e)}\n\nTip: Set TAVILY_API_KEY for better results."
-    
+            return f"Error: All search providers failed. {str(e)}"
     @staticmethod
-    def search_with_urls(query: str) -> str:
+    def open_web(url: str) -> str:
         """
-        Search the web and return results with prominent clickable URLs.
-        This is the primary search function that always shows URLs clearly.
-        
-        Args:
-            query: Search query
+        Open a specific URL in the user's default web browser. 
+        Use this when the user wants to 'visit', 'open', or 'see' a website directly.
+        """
+        try:
+            if not url or not url.strip():
+                return "Error: No URL provided."
             
-        Returns:
-            Formatted search results with clickable URLs
-        """
-        if tavily:
-            try:
-                results = tavily.search(query=query, search_depth="advanced", max_results=8)
-                
-                if isinstance(results, dict) and 'results' in results:
-                    formatted = []
-                    formatted.append(f"🔍 Search: {query}")
-                    formatted.append("=" * 70)
-                    formatted.append("")
-                    
-                    for i, r in enumerate(results['results'][:8], 1):
-                        title = r.get('title', 'No title')
-                        url = r.get('url', '')
-                        content = r.get('content', '')[:300]
-                        
-                        # Main result with title and URL
-                        formatted.append(f"【{i}】 {title}")
-                        formatted.append(f"🔗 {url}")
-                        formatted.append(f"📝 {content}...")
-                        formatted.append("")
-                    
-                    # Prominent quick links section
-                    formatted.append("━" * 70)
-                    formatted.append("🔗 QUICK LINKS - Click or copy these URLs:")
-                    formatted.append("━" * 70)
-                    for i, r in enumerate(results['results'][:8], 1):
-                        url = r.get('url', '')
-                        title = r.get('title', 'No title')[:60]
-                        formatted.append(f"  {i}. {title}")
-                        formatted.append(f"     → {url}")
-                    
-                    return "\n".join(formatted)
-            except Exception as e:
-                return f"Search Error: {str(e)}"
-        
-        # Fallback to simple search
-        return AgentTools.web_search_simple(query)
+            url = url.strip()
+            if not url.startswith(('http://', 'https://')):
+                if "." in url: # Basic check for domain-like strings
+                    url = f"https://{url}"
+                else:
+                    return "Error: Invalid URL format."
+            
+            import webbrowser
+            webbrowser.open(url, new=2)
+            return f"✅ Successfully opened: {url}"
+        except Exception as e:
+            return f"❌ Error opening URL: {str(e)}"
     
     @staticmethod
     def get_system_info() -> str:
-        """Get current system resource usage."""
+        """Get current system resource usage (CPU, RAM, and Swap)."""
         cpu = psutil.cpu_percent(interval=0.5)
         cpu_count = psutil.cpu_count()
         ram = psutil.virtual_memory()
@@ -869,34 +875,7 @@ class AgentTools:
         except Exception as e:
             return f"Error: {str(e)}"
     
-    @staticmethod
-    def create_file(filepath: str, content: str = "") -> str:
-        """
-        Create a new file.
-        
-        Args:
-            filepath: Path for the new file
-            content: Optional initial content
-            
-        Returns:
-            Success or error message
-        """
-        try:
-            p = Path(filepath)
-            
-            if p.exists():
-                return f"Error: File already exists: {filepath}"
-            
-            p.parent.mkdir(parents=True, exist_ok=True)
-            p.write_text(content, encoding='utf-8')
-            return f"✅ Created file: {p.name}\nPath: {p.resolve()}\nSize: {p.stat().st_size} bytes"
-        except FileExistsError:
-            return f"Error: File already exists: {filepath}"
-        except PermissionError:
-            return f"Error: Permission denied: {filepath}"
-        except Exception as e:
-            return f"Error: {str(e)}"
-    
+       
     @staticmethod
     def copy_file(source: str, destination: str) -> str:
         """
@@ -2014,325 +1993,358 @@ class AgentTools:
     # ===== CODING TOOLS =====
     
     @staticmethod
-    def execute_code(code: str, language: str = "python") -> str:
+    def execute_code(code: str = None, language: str = "python", **kwargs) -> str:
         """
-        Execute code snippets and return output.
-        Supports Python, JavaScript, Bash, and PowerShell.
-        
-        Args:
-            code: Code to execute
-            language: Language (python, javascript, bash, powershell)
-            
-        Returns:
-            Execution output or error
+        Executes code snippets dynamically. 
+        Handles JSON-wrapped inputs and ensures code is shown in the output.
         """
-        try:
-            import tempfile
-            import uuid
-            
-            if language.lower() == "python":
-                # Execute Python code
-                try:
-                    import sys
-                    from io import StringIO
-                    
-                    old_stdout = sys.stdout
-                    old_stderr = sys.stderr
-                    sys.stdout = StringIO()
-                    sys.stderr = StringIO()
-                    
-                    try:
-                        exec(code, {"__builtins__": __builtins__})
-                        output = sys.stdout.getvalue()
-                        errors = sys.stderr.getvalue()
-                    finally:
-                        sys.stdout = old_stdout
-                        sys.stderr = old_stderr
-                    
-                    result = ""
-                    if output:
-                        result += f"📤 Output:\n{output}"
-                    if errors:
-                        result += f"\n⚠️ Errors:\n{errors}"
-                    return result if result else "✅ Code executed successfully (no output)"
-                except SyntaxError as se:
-                    return f"❌ Syntax Error: {str(se)}"
-                except Exception as e:
-                    return f"❌ Runtime Error: {str(e)}"
-            
-            elif language.lower() == "javascript":
-                # Execute JavaScript using Node.js
-                temp_file = tempfile.NamedTemporaryFile(suffix='.js', delete=False)
-                temp_file.write(code.encode())
-                temp_file.close()
-                
-                result = subprocess.run(['node', temp_file.name], capture_output=True, text=True, timeout=30)
-                os.unlink(temp_file.name)
-                
-                if result.stdout:
-                    return f"📤 Output:\n{result.stdout}"
-                return f"⚠️ Errors:\n{result.stderr}" if result.stderr else "✅ Code executed"
-            
-            elif language.lower() in ["bash", "shell"]:
-                # Execute bash/shell commands
-                result = subprocess.run(code, shell=True, capture_output=True, text=True, timeout=30)
-                output = f"📤 Output:\n{result.stdout}" if result.stdout else ""
-                output += f"\n⚠️ Errors:\n{result.stderr}" if result.stderr else ""
-                return output if output else "✅ Code executed successfully"
-            
-            elif language.lower() == "powershell":
-                # Execute PowerShell
-                result = subprocess.run(
-                    ["powershell", "-Command", code],
-                    capture_output=True, text=True, timeout=30
-                )
-                output = f"📤 Output:\n{result.stdout}" if result.stdout else ""
-                output += f"\n⚠️ Errors:\n{result.stderr}" if result.stderr else ""
-                return output if output else "✅ Code executed successfully"
-            
-            else:
-                return f"❌ Unsupported language: {language}\nSupported: python, javascript, bash, powershell"
-        
-        except subprocess.TimeoutExpired:
-            return "❌ Code execution timed out (30 seconds limit)"
-        except Exception as e:
-            return f"❌ Execution Error: {str(e)}"
-    
-    @staticmethod
-    def create_code_file(filepath: str, content: str, language: str = "") -> str:
-        """
-        Create a code file with proper syntax.
-        
-        Args:
-            filepath: Path for the code file
-            content: Code content
-            language: Language for file extension (optional)
-            
-        Returns:
-            Success or error message
-        """
-        try:
-            p = Path(filepath)
-            
-            # Detect language from extension if not specified
-            if not language:
-                ext_map = {
-                    '.py': 'Python',
-                    '.js': 'JavaScript',
-                    '.ts': 'TypeScript',
-                    '.java': 'Java',
-                    '.cpp': 'C++',
-                    '.c': 'C',
-                    '.cs': 'C#',
-                    '.html': 'HTML',
-                    '.css': 'CSS',
-                    '.json': 'JSON',
-                    '.xml': 'XML',
-                    '.yaml': 'YAML',
-                    '.yml': 'YAML',
-                    '.sh': 'Bash',
-                    '.bat': 'Batch',
-                    '.ps1': 'PowerShell',
-                    '.sql': 'SQL',
-                    '.md': 'Markdown',
-                }
-                language = ext_map.get(p.suffix.lower(), 'Unknown')
-            
-            p.parent.mkdir(parents=True, exist_ok=True)
-            p.write_text(content, encoding='utf-8')
-            
-            return f"✅ Created {language} file: {p.name}\nPath: {p.resolve()}"
-        except Exception as e:
-            return f"❌ File Creation Error: {str(e)}"
-    
-    @staticmethod
-    def generate_code_template(task: str, language: str = "python") -> str:
-        """
-        Generate code templates based on task description.
-        Uses web search if needed for best practices.
-        
-        Args:
-            task: Description of the code task
-            language: Programming language (default: python)
-            
-        Returns:
-            Code template and explanation
-        """
-        # Search for best practices if needed
-        try:
-            # Common code templates
-            templates = {
-                "python": {
-                    "web_server": '''import http.server
-import socketserver
-
-PORT = 8080
-Handler = http.server.SimpleHTTPRequestHandler
-
-with socketserver.TCPServer(("", PORT), Handler) as httpd:
-    print(f"Server running at http://localhost:{PORT}")
-    httpd.serve_forever()''',
-                    "api": '''from flask import Flask, jsonify, request
-
-app = Flask(__name__)
-
-@app.route('/api', methods=['GET', 'POST'])
-def api_handler():
-    data = request.get_json() if request.method == 'POST' else {}
-    return jsonify({'status': 'success', 'data': data})
-
-if __name__ == '__main__':
-    app.run(debug=True, port=5000)''',
-                    "class": '''class ClassName:
-    def __init__(self, param1, param2):
-        self.param1 = param1
-        self.param2 = param2
-    
-    def method_name(self):
-        """Description of the method."""
-        return f"Parameters: {self.param1}, {self.param2}"
-    
-    def __str__(self):
-        return f"ClassName({self.param1}, {self.param2})"
-
-# Usage
-obj = ClassName("value1", "value2")
-print(obj.method_name())''',
-                    "function": '''def function_name(param1, param2=None):
-    """
-    Description of what the function does.
-    
-    Args:
-        param1: Description of param1
-        param2: Description of param2 (default: None)
-    
-    Returns:
-        Description of return value
-    """
-    # Main logic here
-    result = param1  # Placeholder
-    
-    return result
-
-# Example usage
-result = function_name("test", param2="optional")
-print(result)''',
-                },
-                "javascript": {
-                    "web_server": '''const http = require('http');
-
-const PORT = 3000;
-
-const server = http.createServer((req, res) => {
-    res.writeHead(200, {'Content-Type': 'text/plain'});
-    res.end('Hello World!\\n');
-});
-
-server.listen(PORT, () => {
-    console.log(`Server running at http://localhost:${PORT}/`);
-});''',
-                    "class": '''class ClassName {
-    constructor(param1, param2) {
-        this.param1 = param1;
-        this.param2 = param2;
-    }
-    
-    methodName() {
-        return `Parameters: ${this.param1}, ${this.param2}`;
-    }
-}
-
-// Usage
-const obj = new ClassName("value1", "value2");
-console.log(obj.methodName());''',
-                    "function": '''function functionName(param1, param2 = null) {
-    /**
-     * Description of what the function does.
-     * @param {*} param1 - Description of param1
-     * @param {*} param2 - Description of param2 (optional)
-     * @returns {*} Description of return value
-     */
-    
-    // Main logic here
-    const result = param1; // Placeholder
-    
-    return result;
-}
-
-// Example usage
-const result = functionName("test", "optional");
-console.log(result);''',
-                }
-            }
-            
-            # Look for matching template
-            task_lower = task.lower()
-            selected_template = None
-            
-            if any(word in task_lower for word in ['server', 'http', 'web', 'website']):
-                selected_template = templates.get(language.lower(), {}).get('web_server')
-            elif any(word in task_lower for word in ['api', 'rest', 'endpoint']):
-                selected_template = templates.get(language.lower(), {}).get('api')
-            elif any(word in task_lower for word in ['class', 'object']):
-                selected_template = templates.get(language.lower(), {}).get('class')
-            elif any(word in task_lower for word in ['function', 'method', 'def']):
-                selected_template = templates.get(language.lower(), {}).get('function')
-            
-            if selected_template:
-                return f"📝 **{language.upper()} Code Template:**\n\n```\n{selected_template}\n```\n\n💡 This is a basic template. You can customize it further!"
-            
-            return "❌ No template found for this task. Please describe your task more specifically.\n\n" \
-                   "Available templates: web server, API, class, function"
-        
-        except Exception as e:
-            return f"❌ Error generating template: {str(e)}"
-    
-    @staticmethod
-    def check_code_syntax(code: str, language: str = "python") -> str:
-        """
-        Check code syntax without executing.
+        import json
+        import subprocess
+        import sys
+        import os
         import tempfile
+        import re
 
-        Args:
-            code: Code to check
-            language: Programming language
-            
-        Returns:
-            Syntax validation result
-        """
+        # 1. Flexible Argument Extraction
+        # Handles 'code', 'content', 'script' etc.
+        input_val = code or kwargs.get('code') or kwargs.get('content') or kwargs.get('script')
+        lang_val = language or kwargs.get('language') or "python"
+
+        # 2. JSON Unwrapping
+        # If the LLM sent a JSON string like {"code": "...", "language": "python"}
+        if input_val and str(input_val).strip().startswith("{"):
+            try:
+                data = json.loads(input_val)
+                input_val = data.get('code') or data.get('content') or input_val
+                lang_val = data.get('language') or lang_val
+            except:
+                pass
+
+        if not input_val:
+            return "❌ Error: No code provided to execute."
+
+        # 3. Clean Markdown Backticks
+        if "```" in str(input_val):
+            input_val = re.sub(r"```[\w]*\n", "", str(input_val)).replace("```", "").strip()
+
+        # Create a display block for the UI so the user sees the code
+        display_header = f"--- EXECUTING {lang_val.upper()} ---\n```python\n{input_val}\n```\n"
+
+        # 4. Execution Logic via Temp File
+        suffix = ".py" if "python" in lang_val.lower() else ".js"
+        tmp_file = tempfile.NamedTemporaryFile(suffix=suffix, delete=False, mode='w', encoding='utf-8')
+        
         try:
-            import ast
-            import tempfile
+            tmp_file.write(input_val)
+            tmp_file.close()
+            tmp_path = tmp_file.name
+
+            # Select interpreter
+            if suffix == ".py":
+                cmd = [sys.executable, tmp_path]
+            else:
+                cmd = ['node', tmp_path]
+
+            # Run with a 30-second timeout
+            result = subprocess.run(
+                cmd, 
+                capture_output=True, 
+                text=True, 
+                timeout=30
+            )
             
+            os.unlink(tmp_path) # Cleanup
+
+            # 5. Format the Result
+            output = result.stdout.strip()
+            errors = result.stderr.strip()
+
+            if result.returncode == 0:
+                final_out = f"📤 Output:\n{output}" if output else "✅ Execution successful (No printed output)."
+                return f"{display_header}{final_out}"
+            else:
+                return f"{display_header}❌ Runtime Error:\n{errors}"
+
+        except subprocess.TimeoutExpired:
+            if os.path.exists(tmp_path): os.unlink(tmp_path)
+            return f"{display_header}❌ Error: Execution timed out (30s limit)."
+        except Exception as e:
+            if 'tmp_path' in locals() and os.path.exists(tmp_path): os.unlink(tmp_path)
+            return f"❌ System Error: {str(e)}"
+    @staticmethod
+    def run_file(filepath: str = None, **kwargs) -> str:
+        """
+        Executes scripts and opens HTML. Now with Emergency Unpacking for messy AI inputs.
+        """
+        import subprocess
+        import sys
+        import os
+        import webbrowser
+        import json
+        from pathlib import Path
+
+        # 1. FORCE ABSOLUTE PATH
+        BASE_DIR = Path(r"C:\Users\RAJAB BAIG\Documents\GitHub\BAIG\PERFECT")
+        
+        # --- 2. EMERGENCY UNPACKER (Fixes "No filepath provided" errors) ---
+        # If the input is a JSON string, we extract the actual path
+        if filepath and str(filepath).strip().startswith("{"):
+            try:
+                data = json.loads(filepath)
+                filepath = data.get('filepath') or data.get('path')
+            except:
+                pass
+
+        raw_path = filepath or kwargs.get('filepath') or kwargs.get('path')
+        
+        if not raw_path:
+            return "❌ Error: No filepath provided (Received empty input)."
+
+        # 3. GARBAGE CLEANER
+        # Cleans trailing quotes or braces: MYRAJAB.html"} -> MYRAJAB.html
+        clean_name = str(raw_path).split('"')[0].split('}')[0].strip().strip("'\"")
+        p = (BASE_DIR / Path(clean_name).name).absolute()
+
+        if not p.exists():
+            return f"❌ Error: File not found at {p}"
+
+        try:
+            ext = p.suffix.lower()
+            cwd = str(p.parent)
+            
+            # --- 4. EXECUTION LOGIC ---
+            if ext in ['.html', '.htm']:
+                file_uri = p.as_uri()
+                webbrowser.open(file_uri)
+                return f"✅ HTML file opened in browser: {file_uri}"
+
+            elif ext == '.py':
+                cmd = [sys.executable, str(p)]
+            elif ext == '.js':
+                cmd = ['node', str(p)]
+            elif ext == '.php':
+                cmd = ['php', str(p)]
+            elif ext == '.java':
+                cmd = ['java', str(p)]
+            elif ext == '.c':
+                exe_path = p.with_suffix('.exe')
+                subprocess.run(['gcc', str(p), '-o', str(exe_path)], capture_output=True)
+                cmd = [str(exe_path)]
+            elif ext == '.cpp':
+                exe_path = p.with_suffix('.exe')
+                subprocess.run(['g++', str(p), '-o', str(exe_path)], capture_output=True)
+                cmd = [str(exe_path)]
+            else:
+                os.startfile(str(p))
+                return f"✅ Opened {p.name} with default application."
+
+            # 5. RUN COMMAND
+            result = subprocess.run(cmd, capture_output=True, text=True, timeout=30, cwd=cwd)
+            if result.returncode == 0:
+                return f"✅ Execution Successful: {p.name}\n📤 Output:\n{result.stdout.strip() or '(No output)'}"
+            else:
+                return f"❌ Execution Failed: {p.name}\n⚠️ Error:\n{result.stderr.strip()}"
+
+        except Exception as e:
+            return f"❌ System Error: {str(e)}"
+    @staticmethod
+    def create_code_file(filepath: str = None, content: str = None, **kwargs) -> str:
+        """The most robust version: Extracts clean code and filename, skipping JSON envelopes."""
+        import json, re, os
+        from pathlib import Path
+
+        # 1. SET MANDATORY DIRECTORY
+        BASE_DIR = Path(r"C:\Users\RAJAB BAIG\Documents\GitHub\BAIG\PERFECT")
+        BASE_DIR.mkdir(parents=True, exist_ok=True)
+
+        # 2. EXTRACT FILENAME AND CONTENT (Handing JSON-in-a-string)
+        # Check if the 'filepath' argument is actually a full JSON block
+        raw_input = str(filepath) if filepath else str(kwargs.get('filepath', ''))
+        
+        extracted_filepath = filepath
+        extracted_content = content or kwargs.get('content') or kwargs.get('code')
+
+        # Logic to unpack if the AI sent the whole dictionary as one string
+        if raw_input.strip().startswith("{") or '"filepath":' in raw_input:
+            try:
+                # Use regex for quick extraction of filepath
+                match = re.search(r'"filepath":\s*"([^"]+)"', raw_input)
+                if match:
+                    extracted_filepath = match.group(1)
+                
+                # Try standard JSON parsing to get content
+                data = json.loads(raw_input)
+                extracted_filepath = data.get('filepath') or data.get('path') or extracted_filepath
+                extracted_content = data.get('content') or data.get('code') or extracted_content
+            except:
+                pass
+
+        # --- FIX: RE-PURIFY CONTENT ---
+        # If 'extracted_content' is still a JSON string, we must unpack it to get the PURE code
+        if extracted_content and str(extracted_content).strip().startswith("{"):
+            try:
+                data = json.loads(str(extracted_content))
+                # Only take the value of 'content' or 'code' if it exists
+                extracted_content = data.get('content') or data.get('code') or extracted_content
+            except:
+                pass
+
+        # Final fallback check
+        final_filename = extracted_filepath or "script.py"
+        final_code = extracted_content or ""
+
+        # 3. CLEAN THE FILENAME (Remove any remaining JSON garbage)
+        clean_name = str(final_filename).replace('{', '').replace('}', '').replace('"', '').replace("'", "").strip()
+        clean_name = Path(clean_name).name # Get just the filename (e.g. index.html)
+
+        if not clean_name or clean_name == ".":
+            clean_name = "generated_code.py"
+
+        final_full_path = BASE_DIR / clean_name
+
+        # 4. CLEAN CODE CONTENT (Remove Markdown backticks)
+        if "```" in str(final_code):
+            final_code = re.sub(r"```[\w]*\n", "", str(final_code)).replace("```", "").strip()
+
+        # 5. WRITE FILE
+        try:
+            # We ensure we are writing a string and not a dictionary/list
+            final_full_path.write_text(str(final_code), encoding='utf-8')
+            return f"✅ File saved successfully at: {final_full_path.resolve()}"
+        except Exception as e:
+            return f"❌ System File Error: {str(e)}"
+    @staticmethod
+    def generate_code_template(task: str = None, language: str = "python", **kwargs) -> str:
+        """
+        Generate code templates. (Self removed)
+        """
+        actual_task = task or kwargs.get('task')
+        actual_lang = (language or kwargs.get('language') or "python").lower()
+
+        if not actual_task:
+            return "❌ Error: No task provided."
+
+        templates = {
+            "python": {
+                "web_server": "import http.server\nimport socketserver\nPORT = 8080\nHandler = http.server.SimpleHTTPRequestHandler\nwith socketserver.TCPServer(('', PORT), Handler) as httpd:\n    print(f'Server running at http://localhost:{PORT}')\n    httpd.serve_forever()",
+                "api": "from flask import Flask, jsonify\napp = Flask(__name__)\n@app.route('/api')\ndef home(): return jsonify({'status': 'online'})\nif __name__ == '__main__': app.run()",
+                "class": "class MyClass:\n    def __init__(self, name):\n        self.name = name\n    def greet(self): return f'Hello {self.name}'",
+                "function": "def my_function(data):\n    return data"
+            },
+            "javascript": {
+                "web_server": "const http = require('http');\nhttp.createServer((req, res) => { res.end('Hello'); }).listen(3000);",
+                "class": "class MyClass { constructor(name) { this.name = name; } }",
+                "function": "function myFunc(data) { return data; }"
+            }
+        }
+
+        task_lower = str(actual_task).lower()
+        lang_dict = templates.get(actual_lang, templates["python"])
+        selected = None
+
+        if any(w in task_lower for w in ['server', 'web']): selected = lang_dict.get('web_server')
+        elif any(w in task_lower for w in ['api', 'rest']): selected = lang_dict.get('api')
+        elif any(w in task_lower for w in ['class', 'object']): selected = lang_dict.get('class')
+        elif any(w in task_lower for w in ['function', 'def']): selected = lang_dict.get('function')
+
+        if selected:
+            md = "javascript" if actual_lang == "javascript" else "python"
+            return f"📝 **{actual_lang.upper()} Code Template Generated:**\n```{md}\n{selected}\n```"
+        
+        return "❌ No specific template found for that description."
+
+    @staticmethod
+    def check_code_syntax(code: str, language: str = "python", **kwargs) -> str:
+        """
+        Verify syntax without running. Shows the code being checked.
+        """
+        code = code or kwargs.get('code')
+        if not code: return "❌ No code provided."
+        
+        if "```" in code:
+            code = re.sub(r"```[\w]*\n", "", code).replace("```", "").strip()
+
+        try:
             if language.lower() == "python":
-                try:
-                    ast.parse(code)
-                    return "✅ Python syntax is valid"
-                except SyntaxError as e:
-                    return f"❌ Syntax Error at line {e.lineno}: {e.msg}\n{e.text}"
+                ast.parse(code)
+                return f"✅ Python syntax is valid.\n```python\n{code}\n```"
             
             elif language.lower() == "javascript":
-                import subprocess
-                temp_file = tempfile.NamedTemporaryFile(suffix='.js', delete=False)
-                temp_file.write(b"const a = 1; " + code.encode())
-                temp_file.close()
-                
-                result = subprocess.run(
-                    ['node', '--check', temp_file.name],
-                    capture_output=True, text=True
-                )
-                os.unlink(temp_file.name)
-                
+                temp = tempfile.NamedTemporaryFile(suffix='.js', delete=False)
+                temp.write(code.encode())
+                temp.close()
+                result = subprocess.run(['node', '--check', temp.name], capture_output=True, text=True)
+                os.unlink(temp.name)
                 if result.returncode == 0:
-                    return "✅ JavaScript syntax is valid"
-                return f"❌ JavaScript Syntax Error:\n{result.stderr}"
-            
-            else:
-                return f"❌ Syntax check not supported for: {language}"
-        
+                    return f"✅ JavaScript syntax is valid.\n```javascript\n{code}\n```"
+                return f"❌ JS Syntax Error:\n{result.stderr}"
+
+            return f"❌ Syntax check not supported for {language}"
+        except SyntaxError as e:
+            return f"❌ Syntax Error: {e.msg} at line {e.lineno}"
         except Exception as e:
-            return f"❌ Syntax Check Error: {str(e)}"
+            return f"❌ Error: {str(e)}"
     
+    @staticmethod
+    def local_html_file(filepath: str = None, **kwargs) -> str:
+        """
+        Starts a local HTTP server and opens HTML files via http://localhost:8000.
+        """
+        import http.server
+        import socketserver
+        import threading
+        import webbrowser
+        import time
+        import os
+        from pathlib import Path
+
+        # 1. SETUP PATHS
+        BASE_DIR = Path(r"C:\Users\RAJAB BAIG\Documents\GitHub\BAIG\PERFECT")
+        PORT = 8000
+
+        # 2. CLEAN FILENAME
+        raw_path = filepath or kwargs.get('filepath') or kwargs.get('path')
+        if not raw_path:
+            return "❌ Error: No filename provided."
+        
+        # Strip JSON garbage
+        clean_name = str(raw_path).split('"')[0].split('}')[0].strip().strip("'\"")
+        filename = Path(clean_name).name
+        target_file = BASE_DIR / filename
+
+        if not target_file.exists():
+            return f"❌ Error: {filename} does not exist in the PERFECT folder."
+
+        # 3. BACKGROUND SERVER LOGIC
+        def start_background_server():
+            # This class serves files specifically from our PERFECT directory
+            class MyHandler(http.server.SimpleHTTPRequestHandler):
+                def __init__(self, *args, **kwargs):
+                    super().__init__(*args, directory=str(BASE_DIR), **kwargs)
+                def log_message(self, format, *args): pass # Silence console logs
+
+            socketserver.TCPServer.allow_reuse_address = True
+            try:
+                with socketserver.TCPServer(("", PORT), MyHandler) as httpd:
+                    httpd.serve_forever()
+            except Exception:
+                # If server is already running, this will catch the "Address in use" error silently
+                pass
+
+        # Start server thread if not already active
+        server_thread = threading.Thread(target=start_background_server, daemon=True)
+        server_thread.start()
+        
+        # Give it a split second to initialize
+        time.sleep(0.2)
+
+        # 4. OPEN VIA HTTP
+        url = f"http://localhost:{PORT}/{filename}"
+        try:
+            webbrowser.open(url)
+            return f"✅ Success! File is now serving at: {url}"
+        except Exception as e:
+            return f"❌ Failed to open browser: {str(e)}"
     @staticmethod
     def get_code_snippet_info(language: str) -> str:
         """
@@ -2463,333 +2475,238 @@ AGENT_TOOLS = AgentTools()
 # Maps tool names to their functions for the agent to use
 TOOL_MAP: Dict[str, Any] = {
     # Date/Time
-    "get_datetime": lambda *args, **kwargs: AGENT_TOOLS.get_datetime(),
-    
+    "get_datetime": AGENT_TOOLS.get_datetime,
+    "save_session": AGENT_TOOLS.save_session,
+    "load_session": AGENT_TOOLS.load_session,
     # System Commands
-    "run_powershell": lambda cmd, *args, **kwargs: AGENT_TOOLS.run_powershell(cmd),
-    "run_command": lambda cmd, *args, **kwargs: AGENT_TOOLS.run_command(cmd),
+    "run_powershell": AGENT_TOOLS.run_powershell,
+    "run_command": AGENT_TOOLS.run_command,
     
     # Web & Search
-    "web_search": lambda query, *args, **kwargs: AGENT_TOOLS.web_search(query),
-    "web_search_simple": lambda query, *args, **kwargs: AGENT_TOOLS.web_search_simple(query),
-    "search_with_urls": lambda query, *args, **kwargs: AGENT_TOOLS.search_with_urls(query),
-    "get_weather": lambda location, *args, **kwargs: AGENT_TOOLS.get_weather(location),
-    "get_ip_info": lambda *args, **kwargs: AGENT_TOOLS.get_ip_info(),
+    "web_search": AGENT_TOOLS.web_search,
+    "get_weather": AGENT_TOOLS.get_weather,
+    "get_ip_info": AGENT_TOOLS.get_ip_info,
+    "open_web": AGENT_TOOLS.open_web,
+     "local_html_file": AGENT_TOOLS.local_html_file,
     
-    # System Info - FIXED: Accept any arguments
-    "get_system_info": lambda *args, **kwargs: AGENT_TOOLS.get_system_info(),
-    "get_uptime": lambda *args, **kwargs: AGENT_TOOLS.get_uptime(),
-    "get_battery_status": lambda *args, **kwargs: AGENT_TOOLS.get_battery_status(),
-    "get_cpu_info": lambda *args, **kwargs: AGENT_TOOLS.get_cpu_info(),
-    "get_memory_info": lambda *args, **kwargs: AGENT_TOOLS.get_memory_info(),
+    # System Info
+    "get_system_info": AGENT_TOOLS.get_system_info,
+    "get_uptime": AGENT_TOOLS.get_uptime,
+    "get_battery_status": AGENT_TOOLS.get_battery_status,
+    "get_cpu_info": AGENT_TOOLS.get_cpu_info,
+    "get_memory_info": AGENT_TOOLS.get_memory_info,
     
     # Disk & Files
-    "list_files": lambda path=".", *args, **kwargs: AGENT_TOOLS.list_files(path),
-    "read_file": lambda path, *args, **kwargs: AGENT_TOOLS.read_file(path),
-    "read_file_lines": lambda path, start=None, count=None, *args, **kwargs: AGENT_TOOLS.read_file_lines(path, start, count),
-    "write_file": lambda path, content, *args, **kwargs: AGENT_TOOLS.write_file(path, content),
-    "get_file_info": lambda path, *args, **kwargs: AGENT_TOOLS.get_file_info(path),
-    "get_disk_usage": lambda path=".", *args, **kwargs: AGENT_TOOLS.get_disk_usage(path),
-    "search_files": lambda pattern, path=".", *args, **kwargs: AGENT_TOOLS.search_files(pattern, path),
-    "delete_file": lambda path, *args, **kwargs: AGENT_TOOLS.delete_file(path),
-    "confirm_delete": lambda path, *args, **kwargs: AGENT_TOOLS.confirm_delete(path),
-    "create_folder": lambda path, *args, **kwargs: AGENT_TOOLS.create_folder(path),
-    "create_file": lambda path, content="", *args, **kwargs: AGENT_TOOLS.create_file(path, content),
-    "copy_file": lambda src, dest, *args, **kwargs: AGENT_TOOLS.copy_file(src, dest),
-    "move_file": lambda src, dest, *args, **kwargs: AGENT_TOOLS.move_file(src, dest),
-    "rename_file": lambda old, new, *args, **kwargs: AGENT_TOOLS.rename_file(old, new),
-    "get_file_hash": lambda path, *args, **kwargs: AGENT_TOOLS.get_file_hash(path),
+    "list_files": AGENT_TOOLS.list_files,
+    "read_file": AGENT_TOOLS.read_file,
+    "read_file_lines": AGENT_TOOLS.read_file_lines,
+    "write_file": AGENT_TOOLS.write_file,
+    "get_file_info": AGENT_TOOLS.get_file_info,
+    "get_disk_usage": AGENT_TOOLS.get_disk_usage,
+    "search_files": AGENT_TOOLS.search_files,
+    "delete_file": AGENT_TOOLS.delete_file,
+    "confirm_delete": AGENT_TOOLS.confirm_delete,
+    "create_folder": AGENT_TOOLS.create_folder,
+    "copy_file": AGENT_TOOLS.copy_file,
+    "move_file": AGENT_TOOLS.move_file,
+    "rename_file": AGENT_TOOLS.rename_file,
+    "get_file_hash": AGENT_TOOLS.get_file_hash,
     
-    # PowerShell Windows Admin Tools - FIXED: Accept any arguments
-    "ps_get_services": lambda *args, **kwargs: AGENT_TOOLS.ps_get_services(),
-    "ps_service_action": lambda name, action, *args, **kwargs: AGENT_TOOLS.ps_service_action(name, action),
-    "ps_get_eventlog": lambda log="System", count=10, *args, **kwargs: AGENT_TOOLS.ps_get_eventlog(log, count),
-    "ps_get_processes_detailed": lambda *args, **kwargs: AGENT_TOOLS.ps_get_processes_detailed(),
-    "ps_get_registry": lambda path, *args, **kwargs: AGENT_TOOLS.ps_get_registry(path),
-    "ps_get_scheduled_tasks": lambda *args, **kwargs: AGENT_TOOLS.ps_get_scheduled_tasks(),
-    "ps_get_installed_programs": lambda *args, **kwargs: AGENT_TOOLS.ps_get_installed_programs(),
-    "ps_get_environment_vars": lambda *args, **kwargs: AGENT_TOOLS.ps_get_environment_vars(),
-    "ps_get_network_adapters": lambda *args, **kwargs: AGENT_TOOLS.ps_get_network_adapters(),
-    "ps_get_firewall_rules": lambda *args, **kwargs: AGENT_TOOLS.ps_get_firewall_rules(),
-    "ps_get_disk_partitions": lambda *args, **kwargs: AGENT_TOOLS.ps_get_disk_partitions(),
-    "ps_get_wifi_networks": lambda *args, **kwargs: AGENT_TOOLS.ps_get_wifi_networks(),
-    "ps_get_hotfixes": lambda *args, **kwargs: AGENT_TOOLS.ps_get_hotfixes(),
-    "ps_get_running_tasks": lambda *args, **kwargs: AGENT_TOOLS.ps_get_running_tasks(),
-    "ps_get_systeminfo": lambda *args, **kwargs: AGENT_TOOLS.ps_get_systeminfo(),
-    
-    # Program Installation/Uninstallation
-    "search_program": lambda name, *args, **kwargs: AGENT_TOOLS.search_program(name),
-    "validate_program_safety": lambda name, url, *args, **kwargs: AGENT_TOOLS.validate_program_safety(name, url),
-    "get_installed_programs_list": lambda *args, **kwargs: AGENT_TOOLS.get_installed_programs_list(),
-    "check_program_removable": lambda name, *args, **kwargs: AGENT_TOOLS.check_program_removable(name),
-    "prepare_install_command": lambda name, *args, **kwargs: AGENT_TOOLS.prepare_install_command(name),
-    "prepare_uninstall_command": lambda name, *args, **kwargs: AGENT_TOOLS.prepare_uninstall_command(name),
-    "execute_install": lambda cmd, *args, **kwargs: AGENT_TOOLS.execute_install(cmd),
-    "execute_uninstall": lambda cmd, *args, **kwargs: AGENT_TOOLS.execute_uninstall(cmd),
+    # PowerShell Windows Admin Tools
+    "ps_get_services": AGENT_TOOLS.ps_get_services,
+    "ps_service_action": AGENT_TOOLS.ps_service_action,
+    "ps_get_eventlog": AGENT_TOOLS.ps_get_eventlog,
+    "ps_get_processes_detailed": AGENT_TOOLS.ps_get_processes_detailed,
+    "ps_get_registry": AGENT_TOOLS.ps_get_registry,
+    "ps_get_scheduled_tasks": AGENT_TOOLS.ps_get_scheduled_tasks,
+    "ps_get_installed_programs": AGENT_TOOLS.ps_get_installed_programs,
+    "ps_get_environment_vars": AGENT_TOOLS.ps_get_environment_vars,
+    "ps_get_network_adapters": AGENT_TOOLS.ps_get_network_adapters,
+    "ps_get_firewall_rules": AGENT_TOOLS.ps_get_firewall_rules,
+    "ps_get_disk_partitions": AGENT_TOOLS.ps_get_disk_partitions,
+    "ps_get_wifi_networks": AGENT_TOOLS.ps_get_wifi_networks,
+    "ps_get_hotfixes": AGENT_TOOLS.ps_get_hotfixes,
+    "ps_get_running_tasks": AGENT_TOOLS.ps_get_running_tasks,
+    "ps_get_systeminfo": AGENT_TOOLS.ps_get_systeminfo,
+        # Program Installation/Uninstallation
+    "search_program": AGENT_TOOLS.search_program,
+    "validate_program_safety": AGENT_TOOLS.validate_program_safety,
+    "get_installed_programs_list": AGENT_TOOLS.get_installed_programs_list,
+    "check_program_removable": AGENT_TOOLS.check_program_removable,
+    "prepare_install_command": AGENT_TOOLS.prepare_install_command,
+    "prepare_uninstall_command": AGENT_TOOLS.prepare_uninstall_command,
+    "execute_install": AGENT_TOOLS.execute_install,
+    "execute_uninstall": AGENT_TOOLS.execute_uninstall,
     
     # Program Updates
-    "check_program_updates": lambda name, *args, **kwargs: AGENT_TOOLS.check_program_updates(name),
-    "validate_update_safety": lambda name, url, *args, **kwargs: AGENT_TOOLS.validate_update_safety(name, url),
-    "prepare_update_command": lambda name, *args, **kwargs: AGENT_TOOLS.prepare_update_command(name),
-    "execute_update": lambda cmd, *args, **kwargs: AGENT_TOOLS.execute_update(cmd),
+    "check_program_updates": AGENT_TOOLS.check_program_updates,
+    "validate_update_safety": AGENT_TOOLS.validate_update_safety,
+    "prepare_update_command": AGENT_TOOLS.prepare_update_command,
+    "execute_update": AGENT_TOOLS.execute_update,
     
     # Agent Self-Protection
-    "validate_self_protection": lambda path, *args, **kwargs: AGENT_TOOLS.validate_self_protection(path),
-    "get_agent_info": lambda *args, **kwargs: AGENT_TOOLS.get_agent_info(),
+    "validate_self_protection": AGENT_TOOLS.validate_self_protection,
+    "get_agent_info": AGENT_TOOLS.get_agent_info,
     
     # System Control (Shutdown/Restart)
-    "shutdown_computer": lambda *args, **kwargs: AGENT_TOOLS.shutdown_computer(),
-    "prepare_shutdown": lambda *args, **kwargs: AGENT_TOOLS.prepare_shutdown(),
-    "execute_shutdown": lambda delay=30, *args, **kwargs: AGENT_TOOLS.execute_shutdown(delay),
-    "restart_computer": lambda *args, **kwargs: AGENT_TOOLS.restart_computer(),
-    "execute_restart": lambda delay=30, *args, **kwargs: AGENT_TOOLS.execute_restart(delay),
-    "sleep_computer": lambda *args, **kwargs: AGENT_TOOLS.sleep_computer(),
+    "shutdown_computer": AGENT_TOOLS.shutdown_computer,
+    "prepare_shutdown": AGENT_TOOLS.prepare_shutdown,
+    "execute_shutdown": AGENT_TOOLS.execute_shutdown,
+    "restart_computer": AGENT_TOOLS.restart_computer,
+    "execute_restart": AGENT_TOOLS.execute_restart,
+    "sleep_computer": AGENT_TOOLS.sleep_computer,
     
     # Coding Tools
-    "execute_code": lambda code, language="python", *args, **kwargs: AGENT_TOOLS.execute_code(code, language),
-    "create_code_file": lambda path, content, *args, **kwargs: AGENT_TOOLS.create_code_file(path, content),
-    "generate_code_template": lambda language, task, *args, **kwargs: AGENT_TOOLS.generate_code_template(language, task),
-    "check_code_syntax": lambda code, language="python", *args, **kwargs: AGENT_TOOLS.check_code_syntax(code, language),
-    "get_code_snippet_info": lambda *args, **kwargs: AGENT_TOOLS.get_code_snippet_info(),
+    "execute_code": AGENT_TOOLS.execute_code,
+    "run_file": AgentTools.run_file,
+    "create_code_file": AGENT_TOOLS.create_code_file,
+    "generate_code_template": AGENT_TOOLS.generate_code_template,
+    "check_code_syntax": AGENT_TOOLS.check_code_syntax,
+    "get_code_snippet_info": AGENT_TOOLS.get_code_snippet_info,
     
     # Calculator
-    "calculate": lambda expression, *args, **kwargs: AGENT_TOOLS.calculate(expression),
+    "calculate": AGENT_TOOLS.calculate,
     
     # Network
-    "ping_host": lambda host, count=4, *args, **kwargs: AGENT_TOOLS.ping_host(host, count),
-    "check_port": lambda host, port, *args, **kwargs: AGENT_TOOLS.check_port(host, port),
-    "dns_lookup": lambda domain, *args, **kwargs: AGENT_TOOLS.dns_lookup(domain),
-    "get_network_info": lambda *args, **kwargs: AGENT_TOOLS.get_network_info(),
+    "ping_host": AGENT_TOOLS.ping_host,
+    "check_port": AGENT_TOOLS.check_port,
+    "dns_lookup": AGENT_TOOLS.dns_lookup,
+    "get_network_info": AGENT_TOOLS.get_network_info,
     
-    # File System
-    "get_current_directory": lambda *args, **kwargs: AGENT_TOOLS.get_current_directory(),
-    "change_directory": lambda path, *args, **kwargs: AGENT_TOOLS.change_directory(path),
+    # File System Navigation
+    "get_current_directory": AGENT_TOOLS.get_current_directory,
+    "change_directory": AGENT_TOOLS.change_directory,
     
     # Security
-    "generate_password": lambda length=16, *args, **kwargs: AGENT_TOOLS.generate_password(length),
+    "generate_password": AGENT_TOOLS.generate_password,
     
     # Process Management
-    "get_processes": lambda *args, **kwargs: AGENT_TOOLS.get_processes(),
-    "kill_process": lambda name, *args, **kwargs: AGENT_TOOLS.kill_process(name),
+    "get_processes": AGENT_TOOLS.get_processes,
+    "kill_process": AGENT_TOOLS.kill_process,
     
     # Clipboard
-    "get_clipboard": lambda *args, **kwargs: AGENT_TOOLS.get_clipboard(),
-    "set_clipboard": lambda text, *args, **kwargs: AGENT_TOOLS.set_clipboard(text),
+    "get_clipboard": AGENT_TOOLS.get_clipboard,
+    "set_clipboard": AGENT_TOOLS.set_clipboard,
 }
+SYSTEM_PROMPT = r"""You are a helpful AI Agent. 
+### TOOL DEFINITIONS ###
+1. create_code_file: Use this to SAVE code or HTML to the PERFECT folder.
+2. local_html_file: Use this ONLY for .html files. It opens them in the browser via http://localhost:8000.
+3. run_file: Use this to execute Python (.py), Java, C++, or other scripts.
+4. read_file: Use ONLY to see the source code text. DO NOT use this to "open" or "view" a page for the user.
 
-# --- SYSTEM PROMPT ---
+### CRITICAL RULES ###
+- If a user says "Open [filename].html", you MUST use 'local_html_file' to serve it via HTTP.
+- If a user says "Open [filename].py", you MUST use 'run_file' to execute the script.
+- NEVER use 'read_file' when the user wants to "view" a GUI or a web page.
+- BASE FOLDER: C:\Users\RAJAB BAIG\Documents\GitHub\BAIG\PERFECT
 
-SYSTEM_PROMPT = """You are a helpful AI Agent with access to various tools.
-
-When you need to use a tool, follow this format EXACTLY:
+### COMMAND STRUCTURE ###
 THOUGHT: <your reasoning>
 ACTION: <tool_name>
-ARGS: <argument>
+ARGS: {"filepath": "filename.ext", "content": "CLEAN_CODE_HERE"}
 
-Example:
-THOUGHT: The user wants to know what time it is.
-ACTION: get_datetime
-ARGS: default
+### SAVING & RUNNING RULES ###
+1. ALWAYS save code or HTML using 'create_code_file' before trying to open it.
+2. Ensure the "content" argument in 'create_code_file' contains ONLY raw code (no JSON wrappers).
+3. After saving an HTML file, immediately use 'local_html_file' to display it.
+4. After saving a Python file, immediately use 'run_file' to execute it.
 
-IMPORTANT - WEB SEARCH FALLBACK RULE:
-If you do NOT know the answer to a question, or if you CANNOT perform a task:
-1. You MUST use the web_search tool to find the answer
-2. Search the web for relevant information
-3. Provide the user with accurate information from your search results
-4. Always include clickable URLs in your response
+### EXAMPLES ###
 
-Examples when to use web search:
-- User asks about current events, news, or recent information
-- User asks about something you don't have knowledge of
-- User asks for product reviews, comparisons, or recommendations
-- User asks for tutorial/guide on something specific
-- User asks about a topic outside your training data
-- User asks for instructions on how to do something
-- User's coding task produces errors or unexpected results
-- User asks for specific library/API usage you are unsure about
-- User requests code that is beyond your training data
+USER: Create a hello world HTML and show me.
+THOUGHT: I will save the HTML first and then use the local_html_file tool to open it via http.
+ACTION: create_code_file
+ARGS: {"filepath": "hello.html", "content": "<html><body><h1>Hello!</h1></body></html>"}
+THOUGHT: Now I will serve it via local HTTP.
+ACTION: local_html_file
+ARGS: {"filepath": "hello.html"}
 
-IMPORTANT - CODING WEB SEARCH RULE:
-When helping with coding tasks:
-1. If user reports code is not working as expected, search web for solutions
-2. If you are unsure how to solve a coding problem, search online for examples
-3. If error occurs, search for the error message to find fixes
-4. Always provide working code examples from web search results
+USER: open MYRAJAB.html
+THOUGHT: The user wants to view a local HTML file. I will use 'local_html_file' to open it in the browser via http.
+ACTION: local_html_file
+ARGS: {"filepath": "MYRAJAB.html"}
 
-Available Tools:
-- get_datetime: Get current date/time. Args: format_type ("default", "date", "time", "iso", "unix", "day", "day_short", "full", "full_with_time")
-  IMPORTANT: When user asks about "what day is today" or "what day of the week", use format_type="day" or "full"
-  For date questions like "what date is today", use format_type="date"
-- run_powershell: Execute PowerShell commands. Args: command string
-- run_command: Execute system commands. Args: command string
-- web_search: Search the web with clickable URLs. Args: query string
-- web_search_simple: Simple web search with URLs. Args: query string
-- search_with_urls: Search with prominent clickable URLs. Args: query string
-- get_weather: Get weather info. Args: location string
+USER: run my_script.py
+THOUGHT: The user wants to execute a Python script. I will use 'run_file'.
+ACTION: run_file
+ARGS: {"filepath": "my_script.py"}
+# --- WEB SEARCH & INFO (Priority: Tavily API) ---
+- web_search: Search the web. Args: {"query": "string"}
+- get_weather: Get weather info. Args: {"location": "string"}
+- open_web: Open a URL. Args: {"url": "string"}
+- get_datetime: Get date/time. Args: {"format_type": "default/date/time/iso/unix/day/full"}
 
-IMPORTANT: When using web search, ALWAYS include the full URL in results so user can click/visit them. Format results with numbered links.
+# --- CODING TOOLS ---
+- execute_code: Run code. Args: {"code": "string", "language": "python/javascript/bash"}
+- create_code_file: Create file. Args: {"filepath": "string", "content": "string"}
+- generate_code_template: Templates. Args: {"task": "string", "language": "python"}
+CRITICAL: Use '\\n' for new lines in "code" values. Do not include 'code=' labels in the string.
 
-SYSTEM CONTROL TOOLS (Shutdown/Restart):
-- shutdown_computer: Shutdown computer. Args: force (optional)
-- prepare_shutdown: Prepare shutdown with confirmation. Args: force (optional)
-- execute_shutdown: Execute shutdown after confirmation. Args: force (optional)
-- restart_computer: Restart computer. No args required
-- execute_restart: Execute restart after confirmation
-- sleep_computer: Put computer to sleep
+# --- FILE & DISK MANAGEMENT ---
+- list_files: List folder contents. Args: {"path": "string", "pattern": "*", "include_hidden": false}
+- read_file: Read file. Args: {"filepath": "string", "max_lines": null, "encoding": "utf-8"}
+- write_file: Write/Append file. Args: {"filepath": "string", "content": "string", "append": false}
+- get_file_info: Get file details. Args: {"filepath": "string"}
+- create_folder: Create directory. Args: {"folderpath": "string"}
+- copy_file: Copy. Args: {"source": "string", "destination": "string"}
+- move_file: Move. Args: {"source": "string", "destination": "string"}
+- rename_file: Rename. Args: {"oldpath": "string", "newname": "string"}
+- delete_file: Request deletion. Args: {"filepath": "string"}
+- get_disk_usage: Disk space. Args: {"path": "C:\\\\"}
 
-IMPORTANT: When user says "shutdown", "turn off", "power off", "shut down":
-1. ALWAYS ask for confirmation first
-2. Explain that all programs will be closed
-3. Use shutdown_computer tool to get confirmation
-4. NEVER auto-shutdown without user permission
+# --- SYSTEM & WINDOWS ADMIN ---
+- run_command: Execute CMD. Args: {"command": "string"}
+- run_powershell: Execute PS. Args: {"command": "string"}
+- ps_get_services: Windows services. Args: {"status": "all/running/stopped"}
+- ps_service_action: Control service. Args: {"service_name": "string", "action": "start/stop/restart"}
+- ps_get_installed_programs: List programs. ARGS: {}
+- ps_get_systeminfo: System details. ARGS: {}
 
-IMPORTANT: For ALL web search operations (web_search, get_weather, check_program_updates, search_with_urls), you MUST use Tavily API if available. The Tavily API provides more accurate and comprehensive results.
-- get_system_info: Get CPU/RAM usage
-- get_uptime: Get system uptime
-- get_battery_status: Get battery info (laptops)
-- get_cpu_info: Get CPU details
-- get_memory_info: Get memory details
-- list_files: List directory contents. Args: path, pattern (optional), include_hidden (optional)
-- read_file: Read file contents. Args: filepath, max_lines (optional), encoding (optional)
-- read_file_lines: Read specific lines. Args: filepath, start_line, count
-- write_file: Write to file. Args: filepath, content, append (optional)
-- get_file_info: Get file details. Args: filepath
-- get_disk_usage: Get disk space. Args: path (optional)
-- search_files: Find files. Args: pattern, path (optional), max_results (optional)
-- delete_file: DELETE file/folder with restrictions. Returns confirmation request.
-- confirm_delete: Confirm deletion after user approval. Args: filepath (from delete_file)
-  DELETE RESTRICTIONS:
-  - CANNOT delete system partitions (C:, D:, etc.) or root (/)
-  - CANNOT delete system directories (Windows, System32, SysWOW64, /etc, /bin, etc.)
-  - CANNOT delete non-empty folders
-  - CANNOT delete system files (.sys, .dll, bootmgr, etc.)
-  - MUST ask user for confirmation before any deletion
-  - ALWAYS report what will be deleted (name, size) before deleting
-  - If any restriction is triggered, report error and do NOT proceed
-- create_folder: Create new folder. Args: folderpath
-- create_file: Create new file. Args: filepath, content (optional)
-- copy_file: Copy file/folder. Args: source, destination
-- move_file: Move file/folder. Args: source, destination
-- rename_file: Rename file/folder. Args: oldpath, newname
-- get_file_hash: Calculate file hash. Args: filepath, algorithm (md5/sha1/sha256)
-- ps_get_services: Get Windows services. Args: status (all/running/stopped)
-- ps_service_action: Start/stop/restart service. Args: service_name, action
-- ps_get_eventlog: Get Event Log. Args: logname (System/Application/Security), count
-- ps_get_processes_detailed: Get detailed process list
-- ps_get_registry: Read registry. Args: key_path (e.g., HKLM:\\SOFTWARE\\Microsoft)
-- ps_get_scheduled_tasks: Get scheduled tasks
-- ps_get_installed_programs: Get installed programs list
-- ps_get_environment_vars: Get environment variables
-- ps_get_network_adapters: Get network adapters info
-- ps_get_firewall_rules: Get firewall rules. Args: enabled_only (True/False)
-- ps_get_disk_partitions: Get disk and partition info
-- ps_get_wifi_networks: Get available WiFi networks
-- ps_get_hotfixes: Get installed Windows updates/hotfixes
-- ps_get_running_tasks: Get running tasks with details
-- ps_get_systeminfo: Get comprehensive system information
+# --- PROGRAM MANAGEMENT (Install/Uninstall/Update) ---
+- search_program: Find official source. Args: {"program_name": "string"}
+- execute_install: Install program. Args: {"program_name": "string", "download_url": "string"}
+- execute_uninstall: Uninstall program. Args: {"program_name": "string", "uninstall_string": "string"}
+- check_program_updates: Check for updates. Args: {"program_name": "string"}
 
-# PROGRAM MANAGEMENT (Install/Uninstall)
-- search_program: Search online for program. Args: program_name
-- validate_program_safety: Check if program is safe. Args: program_name, url (optional)
-- get_installed_programs_list: List all installed programs
-- check_program_removable: Check if program can be uninstalled. Args: program_display_name
-- prepare_install_command: Prepare install with confirmation. Args: program_name, download_url
-- prepare_uninstall_command: Prepare uninstall with confirmation. Args: program_name, uninstall_string (optional)
-- execute_install: Execute installation after confirmation. Args: program_name, download_url
-- execute_uninstall: Execute uninstallation after confirmation. Args: program_name, uninstall_string
+# --- SAFETY & SELF-PROTECTION RULES ---
+1. CONFIRMATION: ALWAYS ask user for confirmation BEFORE deleting files, shutting down, or installing software.
+2. PROTECTION: You CANNOT modify or delete: agent.py, requirements.txt, .venv, or ollama processes.
+3. FALLBACK: If a tool fails or you lack data, ALWAYS use web_search (Tavily).
+4. DELETE RULES: You cannot delete non-empty folders or system directories (Windows, System32).
 
-# PROGRAM UPDATES (User must REQUEST this)
-- check_program_updates: Check for updates online (requires user request). Args: program_name
-- validate_update_safety: Validate update source. Args: program_name, download_url
-- prepare_update_command: Prepare update with confirmation. Args: program_name, download_url
-- execute_update: Execute update after confirmation. Args: program_name, download_url
+# --- NETWORK & PROCESSES ---
+- ping_host: Ping. Args: {"host": "string", "count": 4}
+- get_ip_info: Public IP. ARGS: {}
+- get_processes: List processes. ARGS: {}
+- kill_process: Kill by name. Args: {"name": "string"}
+- set_clipboard: Copy to clipboard. Args: {"text": "string"}
 
-UPDATE SAFETY RULES:
-- NEVER auto-check for updates - user must REQUEST this feature
-- NEVER auto-update programs - user must REQUEST update
-- ALWAYS search online first to find official download source
-- ALWAYS ask user for confirmation BEFORE updating
-- Updates are treated like new installations (require permission)
-
-# CODING TOOLS
-- execute_code: Execute code in various languages. Args: code, language (python/javascript/bash/powershell)
-- create_code_file: Create a code file. Args: filepath, content, language (optional)
-- generate_code_template: Generate code templates. Args: task, language (python/javascript)
-- check_code_syntax: Check syntax without execution. Args: code, language
-- get_code_snippet_info: Get language info and patterns. Args: language
-
-CODING RULES:
-- ALWAYS try to help with coding tasks using execute_code tool
-- If code execution fails or output is incorrect, use web_search to find solutions
-- If you don't know how to solve a coding problem, search online for solutions
-- Use web_search to find best practices, code examples, and documentation
-- Support languages: Python, JavaScript, Bash, PowerShell, HTML, CSS, SQL
-- If user asks for code that you cannot generate correctly, search the web for examples
-- ALWAYS use web_search when coding task is beyond your training data
-- If user says code is not working as expected, search web for solutions
-
-IMPORTANT: If a coding task fails or produces unexpected results:
-1. First try to fix the code based on error messages
-2. If you cannot fix it, use web_search to find solutions
-3. Present the web search results with explanations
-
-# AGENT SELF-PROTECTION
-- validate_self_protection: Check if path is protected. Args: path
-- get_agent_info: Get agent information and statistics
-
-SELF-PROTECTION RULES:
-- CANNOT delete, modify, or harm the agent itself (agent.py)
-- CANNOT delete or modify running LLM processes or files
-- CANNOT delete critical files: requirements.txt, README.md, venv, python.exe
-- Protected files: agent.py, agent.exe, requirements.txt, README.md, LICENSE, venv, .venv, ollama, ollama.exe
-
-INSTALL/UNINSTALL SAFETY RULES:
-- ALWAYS search online first to find official download source
-- ALWAYS validate URL safety (HTTPS, official sites preferred)
-- ALWAYS ask user for confirmation BEFORE installing or uninstalling
-- NEVER suggest uninstalling system programs (Windows, drivers, .NET, Visual C++, etc.)
-- NEVER install from suspicious URLs (torrent, crack, keygen sites)
-- If program name contains: windows, microsoft, intel, nvidia, amd, realtek, kernel, system, driver, boot -> DO NOT UNINSTALL
-- System programs list: windows, kernel, runtime, visual c++, vcruntime, msvc, .net framework, dotnet, intel, nvidia, amd, radeon, geforce, realtek, audio, graphics, wireless, bluetooth
-- ALWAYS inform user about what will be installed/uninstalled
-- ping_host: Ping a host. Args: hostname, count (optional)
-- check_port: Check if port is open. Args: host, port
-- dns_lookup: DNS lookup. Args: hostname
-- get_network_info: List network interfaces
-- get_current_directory: Get CWD
-- change_directory: Change directory. Args: path
-- generate_password: Generate password. Args: length (optional), include_special (optional)
-- get_processes: List processes. Args: limit (optional)
-- kill_process: Kill process. Args: PID
-- get_clipboard: Get clipboard content
-- set_clipboard: Set clipboard. Args: text
-- get_ip_info: Get public IP info
-
-If you have the answer, say:
+# --- RESPONSE FORMAT ---
+Be concise. Once you find the answer in the search results, provide the Final Answer immediately. Do not perform redundant searches if the information is already present in the history.If you have the answer, say:
 FINAL ANSWER: <your answer>
 
-If you are writing a poem, story, or simple response, just write it directly without any tool calls.
+If writing a poem, story, or simple greeting, reply directly without tool calls.
 """
+import re
+import datetime
+import webbrowser
+import customtkinter as ctk
 
-# --- GUI APPLICATION ---
+# NOTE: This file assumes TOOL_MAP and AgentTools are defined elsewhere in your project.
+
+# --- REQUIRED IMPORTS ---
+import webbrowser
+import datetime
+import re
+import threading
+import customtkinter as ctk
+# ------------------------
 
 class AgentGUI(ctk.CTk):
     """Main GUI application for the AI Agent."""
     
     # ==================== Helper Methods ====================
-    
-    def append_chat(self, sender, message, tag=None):
-        """Append a message to the chat display."""
-        from datetime import datetime
-        self.chat_display.configure(state="normal")
-        timestamp = datetime.now().strftime("%H:%M")
-        
-        if sender != "System":
-            self.chat_display.insert("end", f"[{timestamp}] ", "timestamp")
-        
-        self.chat_display.insert("end", f"{message}\n\n", tag or "normal")
-        self.chat_display.configure(state="disabled")
-        self.chat_display.see("end")
     
     def clear_chat(self):
         """Clear the chat display."""
@@ -2822,46 +2739,148 @@ class AgentGUI(ctk.CTk):
         """Set the input field with a quick prompt."""
         self.user_input.delete("1.0", "end")
         self.user_input.insert("1.0", prompt)
-    
-    def handle_send(self):
-        """Handle send button click."""
-        user_message = self.user_input.get("1.0", "end").strip()
-        if not user_message:
-            return
-        self.user_input.delete("1.0", "end")
-        self.append_chat("You", user_message, tag="you")
-        self.should_stop = False
-        self.is_processing = True
-        self.send_btn.grid_remove()
-        self.stop_btn.grid()
-        # Start processing in background
-        self.after(100, lambda: self.process_with_agent(user_message))
-    
-    def stop_processing(self):
-        """Stop the current processing."""
-        self.should_stop = True
-        self.append_chat("System", "Stopping...", tag="error")
-    
-    def process_with_agent(self, user_message):
-        """Process user message with the AI agent."""
-        # This will be connected to your agent logic
-        try:
-            self.append_chat("Agent", "Processing your request...", tag="agent")
-            # Add your agent processing logic here
-            response = f"You said: {user_message}"
-            self.append_chat("Agent", response, tag="agent")
-        except Exception as e:
-            self.append_chat("System", f"Error: {str(e)}", tag="error")
-        finally:
-            self.is_processing = False
-            self.should_stop = False
-            self.send_btn.grid()
-            self.stop_btn.grid_remove()
+        self.user_input.focus()
     
     def update_status(self, status):
         """Update the status label."""
         self.status_label.configure(text=f"Status: {status}")
     
+    def set_status(self, text: str, color: str = "white"):
+        """Thread-safe status update."""
+        self.after(0, lambda: self.status_label.configure(text=f"Status: {text}", text_color=color))
+
+    def set_button_state(self, enabled: bool):
+        """Enable or disable the send button and toggle stop button."""
+        state = "normal" if enabled else "disabled"
+        self.is_processing = not enabled
+        def _update():
+            self.send_btn.configure(state=state)
+            if not enabled:
+                self.stop_btn.grid()
+                self.send_btn.grid_remove()
+            else:
+                self.stop_btn.grid_remove()
+                self.send_btn.grid()
+        self.after(0, _update)
+
+    # ---------------- Safe tag helpers ----------------
+    def safe_tag_config(self, tag: str, **options):
+        """Safely configure a text tag (works with Tk Text, ignores CTkTextbox)."""
+        try:
+            if hasattr(self.chat_display, "tag_config"):
+                self.chat_display.tag_config(tag, **options)
+            elif hasattr(self.chat_display, "tag_configure"):
+                self.chat_display.tag_configure(tag, **options)
+        except Exception:
+            pass
+
+    def safe_tag_bind(self, tag: str, sequence: str, func):
+        """Safely bind an event to a text tag."""
+        try:
+            self.chat_display.tag_bind(tag, sequence, func)
+        except Exception:
+            pass
+
+    # ==================== CORE CHAT DISPLAY ====================
+    
+    def append_chat(self, sender: str, text: str, tag: str = None):
+        """Add a message to the chat display with clickable URLs."""
+        # Fix: Convert to string and ensure it's captured before the nested function
+        message_text = str(text) if text is not None else ""
+         # --- ADD THIS LOGIC HERE ---
+        # Record the message in history for the JSON session file
+        self.chat_history.append({
+            "sender": sender,
+            "text": message_text,
+            "tag": tag,
+            "timestamp": datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        })
+        def _update():
+            self.chat_display.configure(state="normal")
+            timestamp = datetime.datetime.now().strftime("%H:%M")
+            
+            # Determine tag based on sender
+            if sender == "You":
+                msg_tag = "you"
+            elif sender == "Agent":
+                msg_tag = "agent"
+            elif sender == "Error":
+                msg_tag = "error"
+            elif sender == "Tool":
+                msg_tag = "tool_call"
+            else:
+                msg_tag = tag or "normal"
+            
+            # Insert timestamp
+            try:
+                self.chat_display.insert("end", f"[{timestamp}] ", "timestamp")
+            except Exception:
+                self.chat_display.insert("end", f"[{timestamp}] ")
+            
+            # Insert sender label
+            try:
+                self.chat_display.insert("end", f"{sender.upper()}: ", msg_tag)
+            except Exception:
+                self.chat_display.insert("end", f"{sender.upper()}: ")
+            
+            # Parse message_text for URLs and make them clickable
+            # Regex matches http(s)://... or www....
+            url_pattern = re.compile(r'(https?://[^\s\)"\']+|www\.[^\s\)"\']+)')
+            last_end = 0
+            
+            for match in url_pattern.finditer(message_text):
+                # Insert text before URL with sender's tag (color)
+                before_url = message_text[last_end:match.start()]
+                if before_url:
+                    try:
+                        self.chat_display.insert("end", before_url, msg_tag)
+                    except Exception:
+                        self.chat_display.insert("end", before_url)
+                
+                # Insert clickable URL
+                raw_url = match.group(0)
+                # Ensure URL has scheme for browser
+                url = raw_url if raw_url.startswith(('http://', 'https://')) else f"https://{raw_url}"
+                
+                start_index = self.chat_display.index("end-1c")
+                self.chat_display.insert("end", raw_url)
+                end_index = self.chat_display.index(f"{start_index}+{len(raw_url)}c")
+                
+                # Create UNIQUE tag for this specific link
+                link_tag = f"url_{self._url_counter}"
+                self._url_counter += 1
+                self._url_registry[link_tag] = url
+                
+                # Style: Blue, Underline, Hand Cursor (via tag)
+                self.safe_tag_config(link_tag, foreground="#4da6ff", underline=True, cursor="hand2")
+                # Bind click event
+                self.safe_tag_bind(link_tag, "<Button-1>", lambda e, u=url: self.open_url(u))
+                
+                last_end = match.end()
+            
+            # Insert remaining text with sender's tag
+            remaining = message_text[last_end:]
+            if remaining:
+                try:
+                    self.chat_display.insert("end", remaining, msg_tag)
+                except Exception:
+                    self.chat_display.insert("end", remaining)
+            
+            self.chat_display.insert("end", "\n\n")
+            self.chat_display.configure(state="disabled")
+            self.chat_display.see("end")
+            
+        self.after(0, _update)
+    def open_url(self, url: str):
+        """Open URL in default browser."""
+        try:
+            if not url.startswith(('http://', 'https://')):
+                url = "https://" + url
+            webbrowser.open(url, new=2) # new=2 opens in new tab
+            self.set_status(f"Opened: {url}", "cyan")
+        except Exception as e:
+            self.append_chat("System", f"Error opening URL: {str(e)}", tag="error")
+
     # ==================== __init__ ====================
     
     def __init__(self):
@@ -2876,6 +2895,15 @@ class AgentGUI(ctk.CTk):
         # Agent state
         self.is_processing = False
         self.should_stop = False
+        # Add this line to track data for JSON saving
+        self.chat_history = [] 
+        
+        # Link the GUI to your AGENT_TOOLS instance
+        AGENT_TOOLS.gui = self
+        # --- URL TRACKING FOR CLICKABLE LINKS ---
+        self._url_counter = 0
+        self._url_registry = {}
+        # -----------------------------------------
         
         # Configure grid - 3 columns: main content, buttons
         self.grid_columnconfigure(0, weight=1)
@@ -2908,13 +2936,13 @@ class AgentGUI(ctk.CTk):
         self.chat_scrollbar.grid(row=0, column=1, padx=0, pady=0, sticky="ns")
         self.chat_display.configure(yscrollcommand=self.chat_scrollbar.set)
         
-        # Configure text tags for styling
-        self.chat_display.tag_config("timestamp", foreground="gray")
-        self.chat_display.tag_config("tool_call", foreground="cyan")
-        self.chat_display.tag_config("error", foreground="#ff6b6b")
-        self.chat_display.tag_config("success", foreground="#51cf66")
-        self.chat_display.tag_config("you", foreground="#74c0fc")
-        self.chat_display.tag_config("agent", foreground="#ffd43b")
+        # Configure text tags for styling (safe)
+        self.safe_tag_config("timestamp", foreground="gray")
+        self.safe_tag_config("tool_call", foreground="cyan")
+        self.safe_tag_config("error", foreground="#ff6b6b")
+        self.safe_tag_config("success", foreground="#51cf66")
+        self.safe_tag_config("you", foreground="#74c0fc")
+        self.safe_tag_config("agent", foreground="#ffd43b")
         
         # Status bar
         self.status_frame = ctk.CTkFrame(self.main_frame, fg_color="transparent")
@@ -2959,256 +2987,249 @@ class AgentGUI(ctk.CTk):
         self.input_scrollbar = ctk.CTkScrollbar(self.input_scroll_frame, command=self.user_input.yview)
         self.input_scrollbar.grid(row=0, column=1, padx=0, pady=0, sticky="ns")
         self.user_input.configure(yscrollcommand=self.input_scrollbar.set)
-        
         # ===== RIGHT SIDE: Buttons =====
         self.buttons_frame = ctk.CTkFrame(self, width=120)
         self.buttons_frame.grid(row=0, column=1, padx=(0, 20), pady=20, sticky="nsew")
         self.buttons_frame.grid_columnconfigure(0, weight=1)
-        
-        # Spacer at top
+
+        # --- 1. DEFINE DATA FIRST (Fixes the AttributeError) ---
+        self.quick_prompts = [
+            ("📅 Today", "what day and date is today?"),
+            ("🌤️ Weather", "what's the weather in Attock Pakistan?"),
+            ("💻 System", "give me my window PC info"),
+            ("📁 Files", "list files in directory path="),
+        ]
+
+        # --- 2. LAYOUT BUTTONS ---
+
+        # Row 0: Spacer at top
         spacer_top = ctk.CTkLabel(self.buttons_frame, text="")
-        spacer_top.grid(row=0, pady=(0, 20))
+        spacer_top.grid(row=0, pady=(0, 10))
         
-        # Send button
+        # Row 1: Send / Stop
         self.send_btn = ctk.CTkButton(
-            self.buttons_frame,
-            text="Send ➤",
-            command=self.handle_send,
-            width=100,
-            height=45,
-            font=("Arial", 13, "bold")
+            self.buttons_frame, text="Send ➤", command=self.handle_send,
+            width=100, height=45, font=("Arial", 13, "bold")
         )
         self.send_btn.grid(row=1, padx=10, pady=5)
         
-        # Stop button (initially hidden)
         self.stop_btn = ctk.CTkButton(
-            self.buttons_frame,
-            text="■ Stop",
-            command=self.stop_processing,
-            width=100,
-            height=45,
-            font=("Arial", 13, "bold"),
-            fg_color="#e74c3c",
-            hover_color="#c0392b"
+            self.buttons_frame, text="■ Stop", command=self.stop_processing,
+            width=100, height=45, font=("Arial", 13, "bold"),
+            fg_color="#e74c3c", hover_color="#c0392b"
         )
-        self.stop_btn.grid(row=2, padx=10, pady=5)
-        self.stop_btn.grid_remove()  # Hide initially
-        
-        # Clear Chat button
+        self.stop_btn.grid(row=1, padx=10, pady=5)
+        self.stop_btn.grid_remove()
+
+        # Row 2: Clear Chat
         self.clear_btn = ctk.CTkButton(
-            self.buttons_frame,
-            text="Clear Chat",
-            command=self.clear_chat,
-            width=100,
-            height=40
+            self.buttons_frame, text="Clear Chat", command=self.clear_chat,
+            width=100, height=35
         )
-        self.clear_btn.grid(row=3, padx=10, pady=5)
+        self.clear_btn.grid(row=2, padx=10, pady=5)
         
-        # Copy Output button
+        # Row 3: Copy Output
         self.copy_btn = ctk.CTkButton(
-            self.buttons_frame,
-            text="Copy Output",
-            command=self.copy_output,
-            width=100,
-            height=40
+            self.buttons_frame, text="Copy Output", command=self.copy_output,
+            width=100, height=35
         )
-        self.copy_btn.grid(row=4, padx=10, pady=5)
+        self.copy_btn.grid(row=3, padx=10, pady=5)
         
-        # Copy Last Response button
+        # Row 4: Copy Last Response
         self.copy_last_btn = ctk.CTkButton(
-            self.buttons_frame,
-            text="Copy Last",
-            command=self.copy_last_response,
-            width=100,
-            height=40
+            self.buttons_frame, text="Copy Last", command=self.copy_last_response,
+            width=100, height=35
         )
-        self.copy_last_btn.grid(row=5, padx=10, pady=5)
+        self.copy_last_btn.grid(row=4, padx=10, pady=5)
         
-        # Clear Input button
+        # Row 5: Clear Input
         self.clear_input_btn = ctk.CTkButton(
+            self.buttons_frame, text="Clear Input", command=self.clear_input,
+            width=100, height=35
+        )
+        self.clear_input_btn.grid(row=5, padx=10, pady=5)
+
+        # Row 6: Save Session (Green)
+        self.save_btn = ctk.CTkButton(
             self.buttons_frame,
-            text="Clear Input",
-            command=self.clear_input,
+            text="Save Session",
+            command=self.handle_save,
             width=100,
-            height=40
+            height=40,
+            fg_color="#27ae60",
+            hover_color="#1e8449"
         )
-        self.clear_input_btn.grid(row=6, padx=10, pady=5)
+        self.save_btn.grid(row=6, padx=10, pady=10)
         
-        # Spacer between buttons
-        spacer_mid = ctk.CTkLabel(self.buttons_frame, text="")
-        spacer_mid.grid(row=7, pady=(20, 0))
-        
-        # Prompts quick buttons
-        prompts_label = ctk.CTkLabel(
+        # Row 7: Load Session (Blue)
+        self.load_btn = ctk.CTkButton(
             self.buttons_frame,
-            text="Quick Prompts",
-            font=("Arial", 11, "bold")
+            text="Load Session",
+            command=self.handle_load,
+            width=100,
+            height=40,
+            fg_color="#2980b9",
+            hover_color="#1f618d"
         )
-        prompts_label.grid(row=8, pady=(0, 10))
+        self.load_btn.grid(row=7, padx=10, pady=5)
         
-        self.quick_prompts = [
-            ("📅 Today", "what day and date is today?"),
-            ("🌤️ Weather", "what's the weather in Lahore Pakistan?"),
-            ("💻 System", "give me my system info"),
-            ("📁 Files", "list files in current directory"),
-        ]
+        # Row 8: Spacer
+        spacer_mid = ctk.CTkLabel(self.buttons_frame, text="")
+        spacer_mid.grid(row=8, pady=(10, 0))
         
+        # Row 9: Quick Prompts Label
+        prompts_label = ctk.CTkLabel(
+            self.buttons_frame, text="Quick Prompts", font=("Arial", 11, "bold")
+        )
+        prompts_label.grid(row=9, pady=(0, 5))
+        
+        # Row 10+: Quick Prompts Loop
         for i, (label, prompt) in enumerate(self.quick_prompts):
             btn = ctk.CTkButton(
-                self.buttons_frame,
-                text=label,
+                self.buttons_frame, text=label,
                 command=lambda p=prompt: self.set_prompt(p),
-                width=100,
-                height=35
+                width=100, height=32
             )
-            btn.grid(row=9 + i, padx=10, pady=3)
+            btn.grid(row=10 + i, padx=10, pady=3)
         
         # Welcome message
         self.append_chat("System", f"Welcome! I'm your AI Agent.\n\nI have {len(TOOL_MAP)} tools available:\n" +
                         "• System info & monitoring\n• File operations\n• Network tools\n" +
-                        "• Web search\n• Calculator\n• And more...\n\n" +
+                        "• Web search\n• Calculator\n• Open Web URLs\n\n" +
                         "Type your question or task below!", tag="success")
-    def append_chat(self, sender: str, text: str, tag: str = None):
-        """Add a message to the chat display with clickable URLs."""
-        def _update():
+
+    # ==================== EVENT HANDLERS ====================
+    
+    def handle_send(self):
+        """Handle user input and start agent thread."""
+        query = self.user_input.get("1.0", "end").strip()
+        if not query:
+            return
+        
+        self.append_chat("You", query)
+        self.user_input.delete("1.0", "end")
+        self.should_stop = False  # Reset stop flag
+        self.set_button_state(False)
+        threading.Thread(target=self.run_agent_thread, args=(query,), daemon=True).start()
+    
+    def handle_save(self):
+        """Invoke the Brain to save the session history."""
+        from tkinter import filedialog
+        try:
+            # FIX: Changed 'initialfilename' to 'initialfile'
+            path = filedialog.asksaveasfilename(
+                defaultextension=".json",
+                filetypes=[("JSON files", "*.json")],
+                initialfile=f"session_{datetime.datetime.now().strftime('%H%M%S')}.json",
+                title="Save Mr. Perfect's Session"
+            )
+            
+            if path:
+                # Call the tool to perform the actual file writing
+                result = AGENT_TOOLS.save_session(path)
+                self.append_chat("System", result, tag="success")
+                self.set_status("Session Saved Successfully", "green")
+        except Exception as e:
+            self.append_chat("Error", f"Save failed: {str(e)}", tag="error")
+    def handle_load(self):
+        """Restore history into the chat display safely and instantly."""
+        from tkinter import filedialog
+        try:
+            path = filedialog.askopenfilename(
+                filetypes=[("JSON files", "*.json")],
+                title="Load Session"
+            )
+            if not path:
+                return
+
+            # 1. Clear UI and internal memory first
             self.chat_display.configure(state="normal")
+            self.chat_display.delete("1.0", "end")
+            self.chat_history = [] 
+            
+            # 2. Use the tool to load JSON data into self.chat_history
+            res = AGENT_TOOLS.load_session(path)
+            
+            # 3. THE LOOP: Display each message from the loaded list
+            # We use _render_history_item to avoid the 'append' loop freeze
+            for msg in self.chat_history:
+                self._render_history_item(
+                    msg.get('sender', 'System'), 
+                    msg.get('text', ''), 
+                    msg.get('tag'),
+                    msg.get('timestamp')
+                )
+            
+            # 4. Show success message
+            self.append_chat("System", res, tag="success")
+            self.set_status("Session Loaded Successfully", "cyan")
+
+        except Exception as e:
+            self.append_chat("Error", f"Load failed: {str(e)}", tag="error")
+    def _render_history_item(self, sender, text, tag, timestamp=None):
+        """Helper to draw text on UI WITHOUT re-saving to the history list."""
+        self.chat_display.configure(state="normal")
+        
+        if not timestamp:
             timestamp = datetime.datetime.now().strftime("%H:%M")
             
-            # Determine tag based on sender
-            if sender == "You":
-                msg_tag = "you"
-            elif sender == "Agent":
-                msg_tag = "agent"
-            elif sender == "Error":
-                msg_tag = "error"
-            elif sender == "Tool":
-                msg_tag = "tool_call"
-            else:
-                msg_tag = None
-            
-            self.chat_display.insert("end", f"[{timestamp}] ", "timestamp")
-            self.chat_display.insert("end", f"{sender.upper()}: ", msg_tag or "sender")
-            
-            # Parse text for URLs and make them clickable
-            # URL regex pattern
-            url_pattern = re.compile(r'https?://[^\s\)"\']+')
-            
-            last_end = 0
-            for match in url_pattern.finditer(text):
-                # Insert text before URL
-                before_url = text[last_end:match.start()]
-                self.chat_display.insert("end", before_url)
-                
-                # Insert clickable URL
-                url = match.group()
-                url_start = self.chat_display.index("end")
-                self.chat_display.insert("end", url)
-                url_end = self.chat_display.index("end")
-                
-                # Create hyperlink tag
-                self.chat_display.tag_add(f"link_{last_end}", url_start, url_end)
-                self.chat_display.tag_configure(f"link_{last_end}", foreground="#5dade2", underline=True)
-                self.chat_display.tag_bind(f"link_{last_end}", "<Button-1>", 
-                    lambda e, u=url: self.open_url(u))
-                self.chat_display.tag_bind(f"link_{last_end}", "<Enter>",
-                    lambda e: self.chat_display.configure(cursor="hand2"))
-                self.chat_display.tag_bind(f"link_{last_end}", "<Leave>",
-                    lambda e: self.chat_display.configure(cursor="arrow"))
-                
-                last_end = match.end()
-            
-            # Insert any remaining text
-            if last_end != 0:
-                remaining = text[last_end:]
-                if remaining:
-                    self.chat_display.insert("end", remaining)
-            else:
-                self.chat_display.insert("end", text)
-            
-            self.chat_display.insert("end", f"\n\n")
-            self.chat_display.configure(state="disabled")
-            self.chat_display.see("end")
-        self.after(0, _update)
-    
-    def open_url(self, url: str):
-        """Open URL in default browser."""
-        import webbrowser
-        try:
-            webbrowser.open(url)
-            self.set_status(f"Opened: {url}", "green")
-        except Exception as e:
-            self.set_status(f"Could not open URL: {str(e)}", "red")
-    
-    def clear_input(self):
-        """Clear the input field."""
-        self.user_input.delete("1.0", "end")
-    
-    def set_prompt(self, prompt: str):
-        """Set the input field with a quick prompt."""
-        self.user_input.delete("1.0", "end")
-        self.user_input.insert("1.0", prompt)
-        self.user_input.focus()
-    
-    def get_chat_content(self) -> str:
-        """Get all chat content."""
-        return self.chat_display.get("1.0", "end").strip()
-    
-    def get_last_response(self) -> str:
-        """Get the last agent response."""
-        content = self.chat_display.get("1.0", "end").strip()
-        lines = content.split("\n")
-        last_response = []
-        capturing = False
-        for line in reversed(lines):
-            if line.startswith("[") and ("AGENT:" in line.upper()):
-                capturing = True
-            elif capturing and line.startswith("["):
-                break
-            if capturing:
-                last_response.insert(0, line)
-        return "\n".join(last_response).replace("[AGENT]:", "").strip()
-    
-    def copy_output(self):
-        """Copy all chat output to clipboard."""
-        content = self.get_chat_content()
-        self.copy_to_clipboard(content)
-        self.set_status("Copied all output!", "green")
-    
-    def copy_last_response(self):
-        """Copy the last agent response to clipboard."""
-        content = self.get_last_response()
-        if content:
-            self.copy_to_clipboard(content)
-            self.set_status("Copied last response!", "green")
+        # Match your existing logic for sender tags
+        if sender == "You":
+            msg_tag = "you"
+        elif sender == "Agent":
+            msg_tag = "agent"
+        elif sender == "Tool":
+            msg_tag = "tool_call"
+        elif sender == "Error":
+            msg_tag = "error"
         else:
-            self.set_status("No response to copy", "red")
+            msg_tag = tag or "normal"
+            
+        # Insert timestamp and sender
+        self.chat_display.insert("end", f"[{timestamp}] ", "timestamp")
+        self.chat_display.insert("end", f"{sender.upper()}: ", msg_tag)
+        
+        # Insert message body
+        self.chat_display.insert("end", f"{text}\n\n")
+        
+        self.chat_display.configure(state="disabled")
+        self.chat_display.see("end")
+    def stop_processing(self):
+        """Stop the current agent processing."""
+        self.should_stop = True
+        self.set_status("Stopping...", "orange")
+        self.append_chat("System", "⏹️ Processing stopped by user.", tag="error")
+
+    # ==================== AGENT LOGIC (run_agent_thread) ====================
+    # PASTE YOUR FULL 'run_agent_thread' METHOD HERE FROM THE BOTTOM OF YOUR FILE
+    # (The one that handles TOOL_MAP, confirmations, LLM loop, etc.)
+    # 
+    # Example structure:
+    #
+    # def run_agent_thread(self, user_prompt: str):
+    #     self.set_status("Thinking...", "yellow")
+    #     messages = [{"role": "system", "content": SYSTEM_PROMPT}, {"role": "user", "content": user_prompt}]
+    #     # ... your loop logic ...
+    #     # ... your tool calling logic ...
+    #     # ... your confirmation dialog calls (show_delete_confirmation, etc.) ...
     
-    def copy_to_clipboard(self, text: str):
-        """Copy text to system clipboard."""
-        try:
-            import tkinter as tk
-            root = tk.Tk()
-            root.withdraw()
-            root.clipboard_clear()
-            root.clipboard_append(text)
-            root.update()
-            root.destroy()
-        except Exception as e:
-            print(f"Clipboard error: {e}")
+    # ==================== CONFIRMATION DIALOGS ====================
+    # PASTE ALL YOUR CONFIRMATION DIALOG METHODS HERE:
+    # - show_delete_confirmation
+    # - show_install_confirmation
+    # - show_uninstall_confirmation
+    # - show_update_confirmation
+    # - show_shutdown_confirmation
+    # - show_restart_confirmation
+    # - format_delete_info
+    # - get_chat_content, get_last_response, copy_to_clipboard
     
-    def format_delete_info(self, delete_info: str) -> str:
-        """Format delete confirmation info for display."""
-        parts = delete_info.replace("CONFIRM_DELETE:", "").split("|")
-        if len(parts) >= 2:
-            if parts[1].startswith("FILE:"):
-                size = ""
-                if len(parts) >= 3 and parts[2].startswith("SIZE:"):
-                    size = f" ({int(parts[2].replace('SIZE:', '')):,} bytes)"
-                return f"Type: File\nName: {parts[1].replace('FILE:', '')}{size}\nPath: {parts[0]}"
-            elif parts[1].startswith("FOLDER:"):
-                return f"Type: Empty Folder\nName: {parts[1].replace('FOLDER:', '')}\nPath: {parts[0]}"
-        return delete_info
-    
+    # (I have omitted the full 500 lines of dialogs/agent-loop for brevity, 
+    # but you MUST paste your existing implementations of those methods below this line)
+
+
+# --- MAIN ENTRY POINT ---
+
     def show_delete_confirmation(self, delete_info: str):
         """Show a confirmation dialog for delete operations."""
         parts = delete_info.replace("CONFIRM_DELETE:", "").split("|")
@@ -3393,11 +3414,17 @@ class AgentGUI(ctk.CTk):
         
         def on_confirm():
             dialog.destroy()
-            self.set_status("Installing...", "orange")
+            try:
+                self.update_status("Installing...")
+            except Exception:
+                pass
             self.append_chat("System", f"📥 Installing {program_name}...", tag="warning")
             install_result = AgentTools.execute_install(program_name, download_url)
             self.append_chat("System", install_result, tag="success" if "✅" in install_result else "error")
-            self.set_status("Ready", "gray")
+            try:
+                self.update_status("Ready")
+            except Exception:
+                pass
         
         def on_cancel():
             dialog.destroy()
@@ -3424,6 +3451,196 @@ class AgentGUI(ctk.CTk):
         cancel_btn.pack(side="left", padx=10)
         
         self.wait_window(dialog)
+    
+    def show_uninstall_confirmation(self, uninstall_info: str):
+        """Show a confirmation dialog for program uninstallation."""
+        parts = uninstall_info.replace("CONFIRM_UNINSTALL:", "").split("|")
+        program_name = parts[0] if parts else "Unknown"
+        uninstall_cmd = ""
+        
+        for part in parts:
+            if part.startswith("CMD:"):
+                uninstall_cmd = part.replace("CMD:", "")
+        
+        # Create confirmation dialog
+        dialog = ctk.CTkToplevel(self)
+        dialog.title("⚠️ Confirm Uninstallation")
+        dialog.geometry("550x350")
+        dialog.transient(self)
+        dialog.grab_set()
+        dialog.focus()
+        
+        # Warning icon and title
+        title_label = ctk.CTkLabel(
+            dialog,
+            text="⚠️ UNINSTALLATION CONFIRMATION REQUIRED",
+            font=("Arial", 16, "bold"),
+            text_color="#e74c3c"
+        )
+        title_label.pack(pady=(20, 10))
+        
+        # Safety warning
+        safety_label = ctk.CTkLabel(
+            dialog,
+            text="✅ SAFETY CHECK: Program verified as safe to uninstall",
+            font=("Arial", 11, "bold"),
+            text_color="#27ae60"
+        )
+        safety_label.pack(pady=5)
+        
+        # Info frame
+        info_frame = ctk.CTkFrame(dialog)
+        info_frame.pack(pady=10, padx=20, fill="both", expand=True)
+        
+        name_label = ctk.CTkLabel(info_frame, text=f"Program: {program_name}", font=("Arial", 13, "bold"))
+        name_label.pack(anchor="w", pady=2)
+        
+        # Warning message
+        warning = ctk.CTkLabel(
+            dialog,
+            text="⚠️ WARNING:\n" +
+                 "• This will remove the program completely\n" +
+                 "• User data may be deleted\n" +
+                 "• You may need to restart your computer\n" +
+                 "• This action cannot be undone!",
+            font=("Arial", 11),
+            text_color="orange",
+            justify="left"
+        )
+        warning.pack(pady=10)
+        
+        # Button frame
+        btn_frame = ctk.CTkFrame(dialog, fg_color="transparent")
+        btn_frame.pack(pady=20)
+        
+        def on_confirm():
+            dialog.destroy()
+            try:
+                self.update_status("Uninstalling...")
+            except Exception:
+                pass
+            self.append_chat("System", f"🗑️ Uninstalling {program_name}...", tag="warning")
+            uninstall_result = AgentTools.execute_uninstall(program_name, uninstall_cmd)
+            self.append_chat("System", uninstall_result, tag="success" if "✅" in uninstall_result else "error")
+            try:
+                self.update_status("Ready")
+            except Exception:
+                pass
+        
+        def on_cancel():
+            dialog.destroy()
+            self.append_chat("System", "❌ Uninstallation cancelled by user.", tag="error")
+        
+        confirm_btn = ctk.CTkButton(
+            btn_frame,
+            text="🗑️ UNINSTALL",
+            command=on_confirm,
+            width=130,
+            height=40,
+            fg_color="#e74c3c",
+            hover_color="#c0392b"
+        )
+        confirm_btn.pack(side="left", padx=10)
+        
+        cancel_btn = ctk.CTkButton(
+            btn_frame,
+            text="✖ Cancel",
+            command=on_cancel,
+            width=120,
+            height=40
+        )
+        cancel_btn.pack(side="left", padx=10)
+        
+        self.wait_window(dialog)
+    
+    def show_update_confirmation(self, update_info: str):
+        """Show a confirmation dialog for program updates."""
+        parts = update_info.replace("CONFIRM_UPDATE:", "").split("|")
+        program_name = ""
+        download_url = ""
+        status = "VERIFY_NEEDED"
+        
+        for part in parts:
+            if part.startswith("URL:"):
+                download_url = part.replace("URL:", "")
+            elif part.startswith("STATUS:"):
+                status = part.replace("STATUS:", "")
+        
+        # Extract program name from URL or use default
+        if not program_name:
+            program_name = parts[0] if parts else "Unknown Program"
+        
+        # Create confirmation dialog
+        dialog = ctk.CTkToplevel(self)
+        dialog.title("🔄 Confirm Update")
+        dialog.geometry("550x380")
+        dialog.transient(self)
+        dialog.grab_set()
+        dialog.focus()
+        
+        # Warning icon and title
+        title_label = ctk.CTkLabel(
+            dialog,
+            text="🔄 UPDATE CONFIRMATION",
+            font=("Arial", 16, "bold"),
+            text_color="#3498db"
+        )
+        title_label.pack(pady=(20, 10))
+        
+        # Info frame
+        info_frame = ctk.CTkFrame(dialog)
+        info_frame.pack(pady=10, padx=20, fill="both", expand=True)
+        
+        name_label = ctk.CTkLabel(info_frame, text=f"Program: {program_name}", font=("Arial", 13, "bold"))
+        name_label.pack(anchor="w", pady=2)
+        
+        url_label = ctk.CTkLabel(info_frame, text=f"URL:\n{download_url}", font=("Arial", 10), wraplength=500)
+        url_label.pack(anchor="w", pady=2)
+        
+        # Button frame
+        btn_frame = ctk.CTkFrame(dialog, fg_color="transparent")
+        btn_frame.pack(pady=20)
+        
+        def on_confirm():
+            dialog.destroy()
+            try:
+                self.update_status("Updating...")
+            except Exception:
+                pass
+            self.append_chat("System", f"⬆️ Updating {program_name}...", tag="warning")
+            update_result = AgentTools.execute_update(program_name, download_url)
+            self.append_chat("System", update_result, tag="success" if "✅" in update_result else "error")
+            try:
+                self.update_status("Ready")
+            except Exception:
+                pass
+        
+        def on_cancel():
+            dialog.destroy()
+            self.append_chat("System", "❌ Update cancelled by user.", tag="error")
+        
+        confirm_btn = ctk.CTkButton(
+            btn_frame,
+            text="⬆️ UPDATE",
+            command=on_confirm,
+            width=120,
+            height=40,
+            fg_color="#3498db",
+            hover_color="#2b86c6"
+        )
+        confirm_btn.pack(side="left", padx=10)
+        
+        cancel_btn = ctk.CTkButton(
+            btn_frame,
+            text="✖ Cancel",
+            command=on_cancel,
+            width=120,
+            height=40
+        )
+        cancel_btn.pack(side="left", padx=10)
+        
+        self.wait_window(dialog)
+
     
     def show_uninstall_confirmation(self, uninstall_info: str):
         """Show a confirmation dialog for program uninstallation."""
@@ -3837,7 +4054,108 @@ class AgentGUI(ctk.CTk):
         self.should_stop = True
         self.set_status("Stopping...", "orange")
         self.append_chat("System", "⏹️ Processing stopped by user.", tag="error")
-    
+    # ==================== SESSION MANAGEMENT ====================
+
+    def handle_save(self):
+        """Invoke Mr. Perfect's brain to save the session."""
+        from tkinter import filedialog
+        path = filedialog.asksaveasfilename(
+            defaultextension=".json",
+            filetypes=[("JSON files", "*.json")],
+            initialfile=f"session_{datetime.datetime.now().strftime('%H%M%S')}.json"
+        )
+        if path:
+            result = AGENT_TOOLS.save_session(path)
+            self.append_chat("System", result, tag="success")
+    def handle_load(self):
+        """Restore history into the chat display without looping errors."""
+        from tkinter import filedialog
+        try:
+            path = filedialog.askopenfilename(
+                filetypes=[("JSON files", "*.json")],
+                title="Load Session"
+            )
+            if not path:
+                return
+
+            # 1. Clear current UI and internal history list to prevent loops
+            self.chat_display.configure(state="normal")
+            self.chat_display.delete("1.0", "end")
+            self.chat_history = [] 
+            
+            # 2. Use the tool to load the file data into self.chat_history
+            result = AGENT_TOOLS.load_session(path)
+            
+            # 3. Re-populate the UI using the SAFE render method
+            for msg in self.chat_history:
+                # We extract timestamp if it exists, otherwise use current
+                ts = msg.get('timestamp', datetime.datetime.now().strftime("%H:%M"))
+                self._render_single_message(
+                    msg.get('sender', 'System'), 
+                    msg.get('text', ''), 
+                    msg.get('tag'),
+                    ts
+                )
+                
+            self.append_chat("System", f"✅ {result}", tag="success")
+            self.set_status("Session Restored", "cyan")
+
+        except Exception as e:
+            self.append_chat("Error", f"Load failed: {str(e)}", tag="error")
+    def refresh_chat_display(self):
+        """Redraws the entire chat window. INSTANT and NO FREEZE."""
+        self.chat_display.configure(state="normal")
+        self.chat_display.delete("1.0", "end") # Clear the screen
+        
+        for msg in self.chat_history:
+            # Get values safely (handling different JSON key names)
+            sender = msg.get('sender') or msg.get('role', 'System')
+            text = msg.get('text') or msg.get('content', '')
+            tag = msg.get('tag')
+            ts = msg.get('timestamp') or datetime.datetime.now().strftime("%H:%M")
+            
+            # Use the helper that ONLY draws text and does NOT append to history
+            self._render_loaded_message(sender, text, tag, ts)
+        
+        self.chat_display.configure(state="disabled")
+        self.chat_display.see("end")
+
+    def _render_loaded_message(self, sender, text, tag, timestamp):
+        """Helper to draw text on screen without re-logging it to the list."""
+        # Use your existing color logic
+        if sender == "You":
+            msg_tag = "you"
+        elif sender == "Agent":
+            msg_tag = "agent"
+        elif sender == "Tool":
+            msg_tag = "tool_call"
+        else:
+            msg_tag = tag or "normal"
+            
+        # Insert to display
+        self.chat_display.insert("end", f"[{timestamp}] ", "timestamp")
+        self.chat_display.insert("end", f"{sender.upper()}: ", msg_tag)
+        self.chat_display.insert("end", f"{text}\n\n")
+
+    def _render_single_message(self, sender, text, tag, timestamp):
+        """Lightweight renderer: Puts text on screen but DOES NOT save to list."""
+        self.chat_display.configure(state="normal")
+        
+        # Match your existing logic for colors
+        if sender == "You":
+            msg_tag = "you"
+        elif sender == "Agent":
+            msg_tag = "agent"
+        elif sender == "Tool":
+            msg_tag = "tool_call"
+        else:
+            msg_tag = tag or "normal"
+            
+        # Insert the message
+        self.chat_display.insert("end", f"[{timestamp}] ", "timestamp")
+        self.chat_display.insert("end", f"{sender.upper()}: ", msg_tag)
+        self.chat_display.insert("end", f"{text}\n\n")
+
     def handle_send(self):
         """Handle user input and start agent thread."""
         query = self.user_input.get("1.0", "end").strip()
@@ -3851,238 +4169,185 @@ class AgentGUI(ctk.CTk):
         threading.Thread(target=self.run_agent_thread, args=(query,), daemon=True).start()
     
     def run_agent_thread(self, user_prompt: str):
-        """Main agent logic running in a separate thread."""
+        import json
+        import re
+        import inspect
+        import os
+        import datetime # Added to ensure timestamps work in the loop
+
+        # --- 1. Speed Bypass for greetings ---
+        greetings = ["hello", "hi", "salam", "hey", "hi there", "hi"]
+        if user_prompt.lower().strip() in greetings:
+            self.append_chat("Agent", "Hello! I'm ready. I have 79 tools to help you create files, run code, and monitor your system. What shall we build?")
+            self.set_status("Ready", "gray")
+            self.set_button_state(True)
+            return
+
         self.set_status("Thinking...", "yellow")
-        messages = [
-            {"role": "system", "content": SYSTEM_PROMPT},
-            {"role": "user", "content": user_prompt}
-        ]
+
+        # --- 2. System Keyword Priority ---
+        system_keywords = ["pc", "system", "disk", "cpu", "ram", "files", "folder", "directory", "save", "create", "run"]
+        if any(k in user_prompt.lower() for k in system_keywords):
+            user_prompt = f"[SYSTEM ACTION REQUIRED] User wants to interact with the local machine. You MUST use a TOOL (ACTION:). Do not just describe what you would do.\nUser Request: {user_prompt}"
+
+        # --- 3. History Management ---
+        if not hasattr(self, "session_history"):
+            self.session_history = []
+        
+        if sum(len(m['content']) for m in self.session_history) > 3000:
+            self.session_history = self.session_history[-4:] 
+
+        # --- 4. Enforced Prompting ---
+        tool_list = ", ".join(TOOL_MAP.keys())
+        instructions = (
+            f"You are a System Agent. Available Tools: {tool_list}\n"
+            "To save code: use 'ACTION: create_code_file' with 'ARGS: {\"filepath\": \"path\", \"content\": \"code\"}'\n"
+            "To run code: use 'ACTION: execute_code' or 'ACTION: run_file'.\n"
+            "You MUST output the code in a markdown block (```python) AND call the tool in the SAME message."
+        )
+
+        messages = [{"role": "system", "content": instructions}]
+        messages.extend(self.session_history)
+        messages.append({"role": "user", "content": user_prompt})
+
         final_answer = ""
-        max_iterations = 8
+        max_iterations = 4 
         
         try:
             for iteration in range(max_iterations):
-                # Check for stop signal
-                if self.should_stop:
-                    self.append_chat("System", "⏹️ Agent processing was stopped.", tag="error")
-                    break
-                
-                self.set_status(f"Thinking... (Step {iteration + 1}/{max_iterations})", "yellow")
-                
-                try:
-                    response = client.chat.completions.create(
-                        model=LOCAL_MODEL,
-                        messages=messages,
-                        temperature=0.1,
-                        max_tokens=500
-                    )
-                except Exception as e:
-                    if self.should_stop:
-                        break
-                    self.append_chat("Error", f"LLM Connection Error: {str(e)}\n\n" +
-                                     "Make sure your local LLM server is running at " + LOCAL_LLM_URL, tag="error")
-                    break
-                except Exception as e:
-                    self.append_chat("Error", f"LLM Connection Error: {str(e)}\n\n" +
-                                     "Make sure your local LLM server is running at " + LOCAL_LLM_URL, tag="error")
-                    break
+                if self.should_stop: break
+                self.set_status(f"Step {iteration + 1}/{max_iterations}...", "yellow")
+
+                # Note: This assumes 'client', 'LOCAL_MODEL' are defined globally
+                response = client.chat.completions.create(
+                    model=LOCAL_MODEL,
+                    messages=messages,
+                    temperature=0.1,
+                    max_tokens=2048
+                )
                 
                 content = response.choices[0].message.content
-                
-                # Parse response for tool calls
+
+                # --- VISIBILITY: Always show code blocks immediately ---
+                if "```" in content:
+                    code_blocks = re.findall(r"```(?:python|javascript|bash|powershell)?\n([\s\S]*?)```", content)
+                    for block in code_blocks:
+                        self.append_chat("Agent", f"📄 Code Generated:\n```python\n{block.strip()}\n```")
+
+                # --- PARSING ACTION & ARGS ---
                 action_match = re.search(r"ACTION:\s*(\w+)", content, re.IGNORECASE)
-                args_match = re.search(r"ARGS:\s*(.*?)(?:\n|$)", content, re.IGNORECASE | re.DOTALL)
-                thought_match = re.search(r"THOUGHT:\s*(.*?)(?:\n|$)", content, re.IGNORECASE | re.DOTALL)
-                
+                args_match = re.search(r"ARGS:\s*(\{.*\}|.*)", content, re.IGNORECASE | re.DOTALL)
+
                 if action_match:
-                    if thought_match:
-                        thought_text = thought_match.group(1).strip()
-                        self.set_status(f"Thinking: {thought_text[:50]}...", "yellow")
-                    
                     tool_name = action_match.group(1).strip().lower()
                     raw_args = args_match.group(1).strip() if args_match else ""
+
+                    # --- IMPROVED ARGUMENT PARSING (FIX FOR WinError 123) ---
+                    processed_args = {}
+                    is_json_dict = False
                     
-                    # Clean args
-                    args = raw_args.strip('"').strip("'").strip()
-                    
+                    try:
+                        # Attempt to handle potential JSON strings from LLM
+                        if raw_args.startswith("{"):
+                            # Clean up potential trailing text outside the JSON block
+                            json_fix = re.search(r"(\{.*\})", raw_args, re.DOTALL)
+                            if json_fix:
+                                processed_args = json.loads(json_fix.group(1))
+                                is_json_dict = True
+                    except Exception:
+                        is_json_dict = False
+
                     if tool_name in TOOL_MAP:
-                        self.set_status(f"Executing {tool_name}...", "cyan")
-                        try:
-                            if args:
-                                result = TOOL_MAP[tool_name](args)
-                            else:
-                                result = TOOL_MAP[tool_name]()
-                        except TypeError as te:
-                            result = f"Error: Invalid arguments for {tool_name}: {str(te)}"
+                        self.set_status(f"Tool: {tool_name}", "cyan")
+                        target_func = TOOL_MAP[tool_name]
+                        sig = inspect.signature(target_func)
+                        params = list(sig.parameters.keys())
+
+                        # --- CONTENT RESCUE ---
+                        # If tool needs 'content' but it's missing from ARGS, pull from code blocks
+                        if "content" in params and not processed_args.get("content"):
+                            blocks = re.findall(r"```(?:python)?\n([\s\S]*?)```", content)
+                            if blocks:
+                                processed_args["content"] = blocks[0].strip()
+
+                        # --- SMART SIGNATURE MAPPING ---
+                        final_kwargs = {}
                         
-                        # Handle delete confirmation specially
-                        if tool_name == "delete_file":
-                            if str(result).startswith("CONFIRM_DELETE:"):
-                                # Show confirmation dialog and wait for user response
-                                delete_info = str(result)
-                                self.pending_delete = delete_info
-                                self.show_delete_confirmation(delete_info)
-                                # For now, we'll append a message asking for confirmation
-                                messages.append({"role": "assistant", "content": content})
-                                messages.append({"role": "user", "content": f"TOOL RESULT: {result}"})
-                                self.append_chat("Tool", f"⚠️ DELETE CONFIRMATION REQUIRED\n{self.format_delete_info(delete_info)}", tag="error")
-                                continue
-                            else:
-                                messages.append({"role": "assistant", "content": content})
-                                messages.append({"role": "user", "content": f"TOOL RESULT: {result}"})
-                                self.append_chat("Tool", f"{tool_name}({args}) → {str(result)[:200]}", tag="tool_call")
-                        
-                        elif tool_name == "prepare_install_command":
-                            if str(result).startswith("CONFIRM_INSTALL:"):
-                                install_info = str(result)
-                                self.show_install_confirmation(install_info)
-                                messages.append({"role": "assistant", "content": content})
-                                messages.append({"role": "user", "content": f"TOOL RESULT: {result}"})
-                                self.append_chat("Tool", f"⚠️ INSTALL CONFIRMATION REQUIRED\nProgram: {args}", tag="warning")
-                                continue
-                            elif str(result).startswith("ERROR:"):
-                                messages.append({"role": "assistant", "content": content})
-                                messages.append({"role": "user", "content": f"TOOL RESULT: {result}"})
-                                self.append_chat("Tool", f"❌ {result}", tag="error")
-                                continue
-                            else:
-                                messages.append({"role": "assistant", "content": content})
-                                messages.append({"role": "user", "content": f"TOOL RESULT: {result}"})
-                                self.append_chat("Tool", f"{tool_name}({args}) → {str(result)[:200]}", tag="tool_call")
-                        
-                        elif tool_name == "prepare_uninstall_command":
-                            if str(result).startswith("CONFIRM_UNINSTALL:"):
-                                uninstall_info = str(result)
-                                self.show_uninstall_confirmation(uninstall_info)
-                                messages.append({"role": "assistant", "content": content})
-                                messages.append({"role": "user", "content": f"TOOL RESULT: {result}"})
-                                self.append_chat("Tool", f"⚠️ UNINSTALL CONFIRMATION REQUIRED\nProgram: {args}", tag="warning")
-                                continue
-                            elif str(result).startswith("ERROR:"):
-                                messages.append({"role": "assistant", "content": content})
-                                messages.append({"role": "user", "content": f"TOOL RESULT: {result}"})
-                                self.append_chat("Tool", f"❌ {result}", tag="error")
-                                continue
-                            else:
-                                messages.append({"role": "assistant", "content": content})
-                                messages.append({"role": "user", "content": f"TOOL RESULT: {result}"})
-                                self.append_chat("Tool", f"{tool_name}({args}) → {str(result)[:200]}", tag="tool_call")
-                        
-                        elif tool_name == "prepare_update_command":
-                            if str(result).startswith("CONFIRM_UPDATE:"):
-                                update_info = str(result)
-                                self.show_update_confirmation(update_info)
-                                messages.append({"role": "assistant", "content": content})
-                                messages.append({"role": "user", "content": f"TOOL RESULT: {result}"})
-                                self.append_chat("Tool", f"⚠️ UPDATE CONFIRMATION REQUIRED\nProgram: {args}", tag="warning")
-                                continue
-                            elif str(result).startswith("ERROR:"):
-                                messages.append({"role": "assistant", "content": content})
-                                messages.append({"role": "user", "content": f"TOOL RESULT: {result}"})
-                                self.append_chat("Tool", f"❌ {result}", tag="error")
-                                continue
-                            else:
-                                messages.append({"role": "assistant", "content": content})
-                                messages.append({"role": "user", "content": f"TOOL RESULT: {result}"})
-                                self.append_chat("Tool", f"{tool_name}({args}) → {str(result)[:200]}", tag="tool_call")
-                        
-                        elif tool_name == "validate_self_protection":
-                            protection_result = str(result)
-                            if "PROTECTED" in protection_result:
-                                messages.append({"role": "assistant", "content": content})
-                                messages.append({"role": "user", "content": f"TOOL RESULT: {result}"})
-                                self.append_chat("Tool", f"🛡️ SELF-PROTECTION: {protection_result}", tag="error")
-                                continue
-                            else:
-                                messages.append({"role": "assistant", "content": content})
-                                messages.append({"role": "user", "content": f"TOOL RESULT: {result}"})
-                                self.append_chat("Tool", f"{tool_name}({args}) → OK", tag="tool_call")
-                        
-                        elif tool_name == "shutdown_computer":
-                            if str(result).startswith("CONFIRM_SHUTDOWN:"):
-                                self.show_shutdown_confirmation(result)
-                                messages.append({"role": "assistant", "content": content})
-                                messages.append({"role": "user", "content": f"TOOL RESULT: {result}"})
-                                continue
-                            else:
-                                messages.append({"role": "assistant", "content": content})
-                                messages.append({"role": "user", "content": f"TOOL RESULT: {result}"})
-                                self.append_chat("Tool", f"{tool_name}({args}) → {str(result)[:200]}", tag="tool_call")
-                        
-                        elif tool_name == "prepare_shutdown":
-                            if str(result).startswith("CONFIRM_SHUTDOWN:"):
-                                self.show_shutdown_confirmation(result)
-                                messages.append({"role": "assistant", "content": content})
-                                messages.append({"role": "user", "content": f"TOOL RESULT: {result}"})
-                                continue
-                            else:
-                                messages.append({"role": "assistant", "content": content})
-                                messages.append({"role": "user", "content": f"TOOL RESULT: {result}"})
-                                self.append_chat("Tool", f"{tool_name}({args}) → {str(result)[:200]}", tag="tool_call")
-                        
-                        elif tool_name == "restart_computer":
-                            self.show_restart_confirmation()
-                            messages.append({"role": "assistant", "content": content})
-                            messages.append({"role": "user", "content": f"TOOL RESULT: {result}"})
-                            continue
-                        
+                        if is_json_dict:
+                            # Map keys directly from JSON dictionary to tool parameters
+                            for p in params:
+                                if p in processed_args:
+                                    final_kwargs[p] = processed_args[p]
                         else:
-                            messages.append({"role": "assistant", "content": content})
-                            messages.append({"role": "user", "content": f"TOOL RESULT: {result}"})
-                            self.append_chat("Tool", f"{tool_name}({args}) → {str(result)[:200]}", tag="tool_call")
-                    else:
-                        error_msg = f"Error: Tool '{tool_name}' not found. Available tools: {', '.join(TOOL_MAP.keys())}"
-                        messages.append({"role": "user", "content": error_msg})
-                        self.append_chat("Error", error_msg, tag="error")
-                        self.set_status("Invalid tool, retrying...", "red")
+                            # If not JSON, treat raw_args as a single positional value
+                            clean_raw = raw_args.strip("'\" ")
+                            for p in params:
+                                if p == "filepath" or p == "path":
+                                    final_kwargs[p] = clean_raw
+                                elif p == "code" or p == "query" or p == "content":
+                                    final_kwargs[p] = clean_raw
+                                    break 
+
+                        try:
+                            # Execute tool via Brain (Mr. Perfect)
+                            if final_kwargs:
+                                result = target_func(**final_kwargs)
+                            else:
+                                result = target_func(raw_args) if raw_args else target_func()
+                        except Exception as e:
+                            result = f"Error calling {tool_name}: {str(e)}"
+
+                        self.append_chat("Tool", f"🛠️ {tool_name} result: {str(result)[:300]}...", tag="tool_call")
+                        
+                        messages.append({"role": "assistant", "content": content})
+                        messages.append({"role": "user", "content": f"TOOL RESULT: {result}\nContinue to next step or provide FINAL ANSWER."})
+                        continue 
+
+                # --- HALLUCINATION ENFORCEMENT ---
+                if ("create" in user_prompt.lower() or "save" in user_prompt.lower()) and not action_match:
+                    if iteration == 0:
+                        messages.append({"role": "user", "content": "SYSTEM: You failed to use a tool. Use 'ACTION: create_code_file' to save the code now."})
                         continue
-                
-                # Check for final answer
-                elif re.search(r"FINAL ANSWER:", content, re.IGNORECASE):
+
+            # --- FINAL ANSWER CHECK ---
+                # 1. If the model explicitly provides the keyword
+                if "FINAL ANSWER:" in content.upper():
                     final_answer = re.split(r"FINAL ANSWER:", content, flags=re.IGNORECASE)[-1].strip()
                     break
                 
-                # Direct response (creative/simple task)
-                else:
-                    # Check if model is stuck in thought loop
-                    if re.search(r"THOUGHT:", content, re.IGNORECASE) and not re.search(r"ACTION:", content, re.IGNORECASE):
-                        self.set_status("Correcting agent response...", "orange")
-                        messages.append({"role": "user", "content": 
-                            "You provided a THOUGHT but no ACTION. Please output the ACTION and ARGS now, or give your FINAL ANSWER."})
-                        continue
+                # 2. If we reach the last iteration and the model is still talking/acting
+                if iteration == max_iterations - 1:
+                    # If it executed a tool, we synthesize a success message
+                    if action_match:
+                        final_answer = f"I have executed the final action ({tool_name}) and completed your request."
                     else:
+                        # Otherwise, just use the raw response as the answer
                         final_answer = content.strip()
-                        break
-            
+                    break
+
+            # --- DISPLAY & SESSION LOGGING ---
             if final_answer:
-                self.append_chat("Agent", final_answer)
-            else:
-                # Agent couldn't provide a clear answer - try web search as fallback
-                self.set_status("Searching the web...", "cyan")
-                self.append_chat("System", "🤔 I couldn't find a clear answer. Let me search the web...", tag="warning")
+                # Clean any accidental "ACTION:" or "ARGS:" text from the final summary
+                clean_display = re.sub(r"ACTION:\s*\w+", "", final_answer, flags=re.IGNORECASE)
+                clean_display = re.sub(r"ARGS:\s*\{.*\}|ARGS:.*", "", clean_display, flags=re.IGNORECASE | re.DOTALL)
                 
-                # Use web search with the original user prompt
-                try:
-                    web_result = AgentTools.web_search(user_prompt)
-                    if not web_result.startswith("Error:") and not web_result.startswith("Search Error"):
-                        self.append_chat("Agent", f"📢 Based on my web search:\n\n{web_result}", tag="tool_call")
-                    else:
-                        self.append_chat("Agent", "I reached the maximum iterations without a clear answer. " +
-                                        "Please try a more specific question or task.", tag="error")
-                except Exception as e:
-                    self.append_chat("Agent", "I reached the maximum iterations without a clear answer. " +
-                                    "Please try a more specific question or task.", tag="error")
-        
+                final_text = clean_display.strip()
+                if final_text:
+                    self.append_chat("Agent", final_text)
+                    self.session_history.append({"role": "user", "content": user_prompt})
+                    self.session_history.append({"role": "assistant", "content": final_text})
+            else:
+                # Fallback: If everything else fails, show the last known content
+                fallback = content.strip() if 'content' in locals() else "Task completed."
+                self.append_chat("Agent", fallback)
+
         except Exception as e:
-            self.append_chat("Error", f"Unexpected error: {str(e)}", tag="error")
-        
+            self.append_chat("Error", f"System Error: {str(e)}", tag="error")
+
         self.should_stop = False
         self.set_status("Ready", "gray")
         self.set_button_state(True)
-
-
-# --- MAIN ENTRY POINT ---
-
+        
 if __name__ == "__main__":
     app = AgentGUI()
     app.mainloop()

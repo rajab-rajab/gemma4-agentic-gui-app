@@ -1,0 +1,103 @@
+# Agentic AI - Requirements
+
+## Core Dependencies
+
+```
+customtkinter>=5.2.0
+openai>=1.0.0
+tavily>=0.3.0
+psutil>=5.9.0
+```
+
+## Optional Dependencies
+
+```
+# For enhanced web search (recommended)
+tavily
+
+# Built into Python - no installation needed:
+# - datetime, subprocess, threading, socket, shutil, json, ast
+# - secrets, string, re, os, pathlib, typing, urllib
+```
+
+## Installation
+
+1. **Create a virtual environment (recommended):**
+   ```bash
+   python -m venv venv
+   source venv/bin/activate  # Linux/Mac
+   venv\Scripts\activate     # Windows
+   ```
+
+2. **Install dependencies:**
+   ```bash
+   pip install -r requirements.txt
+   ```
+
+3. **Set environment variables (optional):**
+   ```bash
+   # For Tavily web search (recommended)
+   export TAVILY_API_KEY=your_api_key_here
+   
+   # Windows
+   set TAVILY_API_KEY=your_api_key_here
+   ```
+
+## Get Tavily API Key
+
+1. Visit [tavily.com](https://tavily.com)
+2. Sign up for free account
+3. Copy your API key
+4. Set it as environment variable
+
+> **Note:** Without Tavily API key, web search will fall back to DuckDuckGo which has limited functionality.
+
+## Local LLM Setup
+
+This app requires a local LLM server running at `http://127.0.0.1:5000/v1`.
+
+### Recommended LLM Servers:
+
+1. **Ollama** (easiest)
+   ```bash
+   # Install Ollama from ollama.ai
+   ollama serve
+   ollama pull gemma:2b  # or any model
+   
+   # For custom endpoint configuration
+   OLLAMA_HOST=127.0.0.1:5000 ollama serve
+   ```
+
+2. **LM Studio**
+   - Download from lmstudio.ai
+   - Start local server from GUI
+   - Use default URL: http://127.0.0.1:1234/v1
+
+3. **llama.cpp server**
+   ```bash
+   ./server -m model.gguf -c 2048 --host 127.0.0.1 --port 5000
+   ```
+
+4. **Text Generation WebUI (Oobabooga)**
+   - Start with API extension
+   - Default URL: http://127.0.0.1:5000/v1
+
+### Model Configuration
+
+Edit these lines in `agent.py` to match your setup:
+```python
+LOCAL_LLM_URL = "http://127.0.0.1:5000/v1"
+LOCAL_MODEL = "gemma"  # Change to your model name (e.g., "llama", "mistral", "gemma:2b")
+```
+
+## Verify Installation
+
+Test your setup:
+```bash
+python agent.py
+```
+
+You should see the GUI window open. If you get connection errors, check:
+1. LLM server is running
+2. URL and model name are correct
+3. Firewall allows local connections
